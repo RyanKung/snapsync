@@ -1,0 +1,546 @@
+use flate2::read::GzDecoder;
+use futures_util::StreamExt;
+use md5;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::io::{self, BufReader, Read};
+use std::time::SystemTime;
+use tar::Archive;
+use thiserror::Error;
+use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio_retry2::{Retry, RetryError};
+use tracing::{error, info, warn};
+
+#[derive(Error, Debug)]
+pub enum SnapshotError {
+    #[error(transparent)]
+    IoError(#[from] io::Error),
+
+    #[error(transparent)]
+    ReqwestError(#[from] reqwest::Error),
+
+    #[error(transparent)]
+    SerdeJsonError(#[from] serde_json::Error),
+
+    #[error("Snapshot download failed: {0}")]
+    DownloadFailed(String),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct SnapshotMetadata {
+    key_base: String,
+    chunks: Vec<String>,
+    timestamp: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DownloadConfig {
+    /// Base URL for snapshot downloads (e.g., "https://pub-xxx.r2.dev")
+    pub snapshot_download_url: String,
+    /// Temporary directory for downloads (e.g., ".rocks.snapshot")
+    pub snapshot_download_dir: String,
+    /// Network name (e.g., "MAINNET", "TESTNET")
+    pub network: String,
+}
+
+impl Default for DownloadConfig {
+    fn default() -> Self {
+        Self {
+            snapshot_download_url: "https://pub-d352dd8819104a778e20d08888c5a661.r2.dev"
+                .to_string(),
+            snapshot_download_dir: ".rocks.snapshot".to_string(),
+            network: "MAINNET".to_string(),
+        }
+    }
+}
+
+fn metadata_path(network: &str, shard_id: u32) -> String {
+    format!("{}/{}/latest.json", network, shard_id)
+}
+
+async fn download_metadata(
+    network: &str,
+    shard_id: u32,
+    config: &DownloadConfig,
+) -> Result<SnapshotMetadata, SnapshotError> {
+    let metadata_url = format!(
+        "{}/{}",
+        config.snapshot_download_url,
+        metadata_path(network, shard_id)
+    );
+    info!("Retrieving metadata from {}", metadata_url);
+    let metadata = reqwest::get(metadata_url)
+        .await?
+        .json::<SnapshotMetadata>()
+        .await?;
+    Ok(metadata)
+}
+
+/// Compute MD5 hash of a local file
+async fn compute_file_md5(filename: &str) -> Result<String, SnapshotError> {
+    let mut file = tokio::fs::File::open(filename).await?;
+    let mut hasher = md5::Context::new();
+    let mut buffer = vec![0u8; 8192]; // 8KB buffer for streaming
+
+    loop {
+        let n = file.read(&mut buffer).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.consume(&buffer[..n]);
+    }
+
+    Ok(format!("{:x}", hasher.compute()))
+}
+
+/// Verify if a local file matches the remote file (by checking size and MD5 via HEAD request)
+/// Returns Ok(true) if the file is valid and doesn't need re-downloading
+async fn verify_local_file(filename: &str, remote_url: &str) -> Result<bool, SnapshotError> {
+    // Check if local file exists
+    let local_metadata = match tokio::fs::metadata(filename).await {
+        Ok(m) => m,
+        Err(_) => return Ok(false), // File doesn't exist, need to download
+    };
+
+    // Send HEAD request to get remote file info
+    let client = reqwest::Client::new();
+    let response = match client.head(remote_url).send().await {
+        Ok(r) => match r.error_for_status() {
+            Ok(resp) => resp,
+            Err(e) => {
+                warn!("HEAD request failed for {}: {}", remote_url, e);
+                return Ok(false);
+            }
+        },
+        Err(e) => {
+            warn!("Failed to connect to {}: {}", remote_url, e);
+            return Ok(false);
+        }
+    };
+
+    // Get remote file size
+    let remote_size = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    // Compare file sizes first (quick check)
+    if let Some(remote_size) = remote_size {
+        if local_metadata.len() != remote_size {
+            info!(
+                "Size mismatch for {}: local={} bytes, remote={} bytes",
+                filename,
+                local_metadata.len(),
+                remote_size
+            );
+            return Ok(false);
+        }
+    } else {
+        // Can't verify size, assume need to re-download
+        return Ok(false);
+    }
+
+    // Get ETag (which is MD5 for simple uploads in S3/R2)
+    let etag = response
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim_matches('"'));
+
+    // Verify MD5 if ETag is available
+    if let Some(etag_val) = etag {
+        // Compute local file MD5
+        match compute_file_md5(filename).await {
+            Ok(local_md5) => {
+                if local_md5 == etag_val {
+                    info!(
+                        "✓ File {} already verified (MD5: {})",
+                        filename.split('/').last().unwrap_or(filename),
+                        local_md5
+                    );
+                    return Ok(true);
+                } else {
+                    info!(
+                        "MD5 mismatch for {}: local={}, remote={}",
+                        filename, local_md5, etag_val
+                    );
+                    return Ok(false);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to compute MD5 for {}: {}", filename, e);
+                return Ok(false);
+            }
+        }
+    }
+
+    // No ETag available, but size matches - assume valid
+    info!(
+        "File {} size matches ({} bytes), assuming valid (no ETag available)",
+        filename.split('/').last().unwrap_or(filename),
+        local_metadata.len()
+    );
+    Ok(true)
+}
+
+async fn download_file(
+    url: &str,
+    filename: &str,
+    chunk_pb: indicatif::ProgressBar,
+    main_pb: indicatif::ProgressBar,
+    use_progress_bars: bool,
+    global_start: SystemTime,
+) -> Result<(), SnapshotError> {
+    // Create parent directory if needed
+    if let Some(parent) = std::path::Path::new(filename).parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    let mut file = BufWriter::new(tokio::fs::File::create(filename).await?);
+    let download_response = reqwest::get(url).await?.error_for_status()?;
+    let content_length = download_response.content_length();
+
+    // Get ETag from response headers (this is MD5 for simple S3/R2 uploads)
+    let etag = download_response
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim_matches('"').to_string());
+
+    if let Some(ref etag_val) = etag {
+        info!("ETag: {} (will verify as MD5)", etag_val);
+    }
+
+    // Configure the progress bar for the current chunk
+    if let Some(length) = content_length {
+        chunk_pb.set_length(length);
+        if !use_progress_bars {
+            let verify_msg = if etag.is_some() {
+                " [MD5 verification enabled]"
+            } else {
+                ""
+            };
+            info!(
+                "Starting download of {} ({} bytes){}",
+                filename.split('/').last().unwrap_or(filename),
+                length,
+                verify_msg
+            );
+        }
+    }
+    chunk_pb.set_style(
+        indicatif::ProgressStyle::default_bar()
+            .template(
+                "{spinner:.green} {msg:30.bold} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec})",
+            )
+            .unwrap()
+            .progress_chars("=>-"),
+    );
+    chunk_pb.set_message(filename.split('/').last().unwrap_or(filename).to_string());
+
+    // Stream download and compute MD5 simultaneously
+    let mut byte_stream = download_response.bytes_stream();
+    let mut hasher = if etag.is_some() {
+        Some(md5::Context::new())
+    } else {
+        None
+    };
+
+    while let Some(piece) = byte_stream.next().await {
+        let chunk = piece?;
+
+        // Update MD5 hash
+        if let Some(ref mut h) = hasher {
+            h.consume(&chunk);
+        }
+
+        file.write_all(&chunk).await?;
+        let chunk_len = chunk.len() as u64;
+
+        // Update only the individual chunk progress bar during download
+        chunk_pb.inc(chunk_len);
+    }
+    file.flush().await?;
+
+    // Verify file size
+    let file_size = tokio::fs::metadata(filename).await?.len();
+    if let Some(content_length) = content_length {
+        if file_size != content_length {
+            return Err(SnapshotError::IoError(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "File size mismatch for {}: expected {} bytes, got {} bytes",
+                    filename, content_length, file_size
+                ),
+            )));
+        }
+    } else {
+        warn!(
+            "Content-Length header was not present for {}. Cannot verify file size.",
+            url
+        );
+    }
+
+    // Verify MD5 checksum (Snapchain's ETag is always MD5 for simple uploads)
+    if let (Some(expected_etag), Some(hasher)) = (etag, hasher) {
+        let computed_md5 = format!("{:x}", hasher.compute());
+
+        if computed_md5 != expected_etag {
+            // MD5 mismatch - delete corrupted file
+            let _ = tokio::fs::remove_file(filename).await;
+            return Err(SnapshotError::IoError(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "MD5 checksum mismatch for {}: expected {}, got {}",
+                    filename, expected_etag, computed_md5
+                ),
+            )));
+        }
+
+        info!(
+            "✓ MD5 verified: {} for {}",
+            computed_md5,
+            filename.split('/').last().unwrap_or(filename)
+        );
+    } else {
+        info!(
+            "No ETag available for {}, skipping MD5 verification (size verified)",
+            filename.split('/').last().unwrap_or(filename)
+        );
+    }
+
+    // Increment the main progress bar by 1 chunk after successful download
+    main_pb.inc(1);
+
+    if !use_progress_bars {
+        let current_chunk = main_pb.position();
+        let total_chunks = main_pb.length().unwrap_or(0);
+
+        // Calculate global ETA based on overall progress
+        let global_eta_str = if current_chunk > 0 && current_chunk < total_chunks {
+            let global_elapsed = global_start.elapsed().unwrap_or_default().as_secs();
+            let remaining_chunks = total_chunks - current_chunk;
+            let global_eta_seconds = (global_elapsed * remaining_chunks) / current_chunk;
+            let eta_formatted = format!(
+                "{}h{}m",
+                global_eta_seconds / 3600,
+                (global_eta_seconds % 3600) / 60
+            );
+            format!(" (ETA: {})", eta_formatted)
+        } else {
+            String::new()
+        };
+
+        info!(
+            "Completed {}/{} chunks ({}%){}",
+            current_chunk,
+            total_chunks,
+            if total_chunks > 0 {
+                (current_chunk * 100) / total_chunks
+            } else {
+                0
+            },
+            global_eta_str
+        );
+    }
+
+    Ok(())
+}
+
+pub async fn download_snapshots(
+    config: &DownloadConfig,
+    db_dir: String,
+    shard_ids: Vec<u32>,
+) -> Result<(), SnapshotError> {
+    let snapshot_dir = config.snapshot_download_dir.clone();
+    std::fs::create_dir_all(snapshot_dir.clone())?;
+
+    // First, fetch metadata for all shards
+    let mut all_metadata = HashMap::new();
+    for &shard_id in &shard_ids {
+        let metadata = download_metadata(&config.network, shard_id, config).await?;
+        all_metadata.insert(shard_id.to_string(), metadata);
+    }
+
+    // Persist metadata.json file
+    let metadata_file_path = format!("{}/metadata.json", snapshot_dir);
+    let metadata_json = serde_json::to_string_pretty(&all_metadata)?;
+    std::fs::write(&metadata_file_path, metadata_json)?;
+    info!("Persisted metadata to {}", metadata_file_path);
+
+    // Create a multi-progress bar for overall progress
+    let multi_progress = indicatif::MultiProgress::new();
+    let main_style = indicatif::ProgressStyle::default_bar()
+        .template("{spinner:.green} Overall Progress [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} chunks ({eta})")
+        .unwrap()
+        .progress_chars("=>-");
+
+    // Count total chunks for the main progress bar
+    let mut total_chunks = 0;
+    for metadata in all_metadata.values() {
+        total_chunks += metadata.chunks.len();
+    }
+
+    let main_pb = multi_progress.add(indicatif::ProgressBar::new(total_chunks as u64));
+    main_pb.set_style(main_style);
+
+    // Check if we're in a TTY environment - if not, disable progress bars
+    let use_progress_bars = atty::is(atty::Stream::Stdout);
+    let global_start = SystemTime::now();
+    if !use_progress_bars {
+        info!("No TTY detected, progress will be logged instead of shown as progress bars");
+        info!(
+            "Starting download of {} chunks across {} shards",
+            total_chunks,
+            shard_ids.len()
+        );
+    }
+
+    // Process each shard sequentially
+    for &shard_id in &shard_ids {
+        let metadata_json = &all_metadata[&shard_id.to_string()];
+        let base_path = &metadata_json.key_base;
+        let shard_start = SystemTime::now();
+
+        std::fs::create_dir_all(format!("{}/shard-{}", snapshot_dir, shard_id))?;
+
+        let mut local_chunks = vec![];
+        // Process each chunk sequentially within the shard
+        for (chunk_index, chunk) in metadata_json.chunks.iter().enumerate() {
+            let eta_str = if !use_progress_bars && chunk_index > 0 {
+                let elapsed = shard_start.elapsed().unwrap_or_default().as_secs();
+                let remaining_chunks = metadata_json.chunks.len() - chunk_index;
+                let eta_seconds = (elapsed * remaining_chunks as u64) / chunk_index as u64;
+                format!(
+                    "Shard ETA: {}h{}m",
+                    eta_seconds / 3600,
+                    (eta_seconds % 3600) / 60
+                )
+            } else {
+                String::new()
+            };
+
+            let download_path = format!(
+                "{}/{}/{}",
+                config.snapshot_download_url, base_path, chunk
+            );
+
+            let filename = format!("{}/shard-{}/{}", snapshot_dir, shard_id, chunk);
+
+            // Check if file already exists and is valid (resumable download support)
+            match verify_local_file(&filename, &download_path).await {
+                Ok(true) => {
+                    // File is already downloaded and verified, skip download
+                    info!(
+                        "Skipping already verified chunk {} for shard {} ({}/{} chunks)",
+                        chunk,
+                        shard_id,
+                        chunk_index + 1,
+                        metadata_json.chunks.len()
+                    );
+                    main_pb.inc(1);
+                    local_chunks.push(filename);
+                    continue;
+                }
+                Ok(false) => {
+                    // File needs to be downloaded or re-downloaded
+                    info!(
+                        "Downloading chunk {} for shard {} ({}/{} chunks in shard) {}",
+                        chunk,
+                        shard_id,
+                        chunk_index + 1,
+                        metadata_json.chunks.len(),
+                        eta_str
+                    );
+                }
+                Err(e) => {
+                    // Error verifying local file, will re-download
+                    warn!(
+                        "Failed to verify local file {}: {}, will re-download",
+                        filename, e
+                    );
+                }
+            }
+
+            // Set up individual progress bar for this chunk (only if TTY available)
+            let chunk_pb = if use_progress_bars {
+                multi_progress.add(indicatif::ProgressBar::new(0)) // Length set in download_file
+            } else {
+                indicatif::ProgressBar::hidden()
+            };
+
+            let retry_strategy =
+                tokio_retry2::strategy::FixedInterval::from_millis(10_000).take(5);
+            // Directly await the download of the current chunk before proceeding to the next
+            let result = Retry::spawn(retry_strategy, || {
+                let download_path_clone = download_path.clone();
+                let filename_clone = filename.clone();
+                let chunk_pb_clone = chunk_pb.clone();
+                let main_pb_clone = main_pb.clone();
+
+                async move {
+                    let result = download_file(
+                        &download_path_clone,
+                        &filename_clone,
+                        chunk_pb_clone,
+                        main_pb_clone,
+                        use_progress_bars,
+                        global_start,
+                    )
+                    .await;
+                    match result {
+                        Ok(_) => Ok(()),
+                        Err(e) => {
+                            warn!("Failed to download {} due to error: {}", filename_clone, e);
+                            RetryError::to_transient(e)
+                        }
+                    }
+                }
+            })
+            .await;
+
+            chunk_pb.finish_and_clear(); // Remove the finished chunk bar
+
+            if let Err(e) = result {
+                error!("Failed to download snapshot chunk {}: {}", filename, e);
+                main_pb.finish_with_message("Download failed!");
+                return Err(SnapshotError::from(e));
+            }
+            local_chunks.push(filename);
+        }
+
+        let tar_filename = format!("{}/shard_{}_snapshot.tar", snapshot_dir, shard_id);
+        let mut tar_file = BufWriter::new(tokio::fs::File::create(tar_filename.clone()).await?);
+
+        for filename in local_chunks {
+            info!(
+                "Unzipping snapshot chunk {} for shard {}",
+                filename, shard_id
+            );
+            let file = std::fs::File::open(filename)?;
+            let reader = BufReader::new(file);
+            let mut gz_decoder = GzDecoder::new(reader);
+            let mut buffer = Vec::new();
+            // These files are small, 100MB max each
+            gz_decoder.read_to_end(&mut buffer)?;
+            tar_file.write_all(&buffer).await?;
+        }
+        tar_file.flush().await?;
+
+        let file = std::fs::File::open(tar_filename.clone())?;
+        info!(
+            "Unpacking snapshot file {} for shard {}",
+            tar_filename, shard_id
+        );
+        let mut archive = Archive::new(file);
+        std::fs::create_dir_all(&db_dir)?;
+        archive.unpack(&db_dir)?;
+    }
+
+    main_pb.finish_with_message("All snapshots downloaded successfully!");
+    std::fs::remove_dir_all(snapshot_dir)?;
+    Ok(())
+}
+
