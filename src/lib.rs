@@ -660,64 +660,43 @@ pub async fn download_snapshots(
         let tar_filename = format!("{}/shard_{}_snapshot.tar", snapshot_dir, shard_id);
         let mut tar_file = BufWriter::new(tokio::fs::File::create(tar_filename.clone()).await?);
 
-        // Parallel decompression with ordered writing
-        let semaphore = Arc::new(Semaphore::new(4)); // Limit parallel decompression
-        let mut decompress_tasks = vec![];
+        // Process files sequentially with minimal memory footprint
+        // Decompress and write immediately instead of buffering all in memory
+        let total_files = local_chunks.len();
 
         for (index, filename) in local_chunks.iter().enumerate() {
-            // Acquire semaphore permit BEFORE spawning blocking task
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
-            let filename = filename.clone();
-            let merge_pb_clone = merge_pb.clone();
-            let total_files = local_chunks.len();
+            let chunk_name = std::path::Path::new(filename)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
 
-            let task = tokio::task::spawn_blocking(move || {
-                let _permit = permit; // Hold permit until task completes
+            merge_pb.set_message(format!(
+                "| 🔄 Processing: {}/{} | {}",
+                index + 1,
+                total_files,
+                chunk_name
+            ));
 
-                // Update progress
-                let chunk_name = std::path::Path::new(&filename)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
-                merge_pb_clone.set_message(format!(
-                    "| 🔄 Decompressing: {}/{} | {}",
-                    index + 1,
-                    total_files,
-                    chunk_name
-                ));
-
-                // Decompress file
-                let file = std::fs::File::open(&filename).map_err(SnapshotError::IoError)?;
-                let reader = std::io::BufReader::with_capacity(4 * 1024 * 1024, file); // 4MB buffer
+            // Decompress in blocking task to avoid blocking async runtime
+            let filename_clone = filename.clone();
+            let buffer = tokio::task::spawn_blocking(move || {
+                let file = std::fs::File::open(&filename_clone).map_err(SnapshotError::IoError)?;
+                let reader = std::io::BufReader::with_capacity(4 * 1024 * 1024, file);
                 let mut gz_decoder = GzDecoder::new(reader);
                 let mut buffer = Vec::new();
                 gz_decoder
                     .read_to_end(&mut buffer)
                     .map_err(SnapshotError::IoError)?;
-
                 Ok::<Vec<u8>, SnapshotError>(buffer)
-            });
-
-            decompress_tasks.push(task);
-        }
-
-        // Wait for decompression and write to tar in order
-        for (index, task) in decompress_tasks.into_iter().enumerate() {
-            let buffer = task.await.map_err(|e| {
+            })
+            .await
+            .map_err(|e| {
                 SnapshotError::IoError(std::io::Error::other(format!("Task join error: {}", e)))
             })??;
 
+            // Write immediately to tar, then buffer is dropped
             tar_file.write_all(&buffer).await?;
             merge_pb.inc(1);
-
-            // Update progress message
-            if index % 10 == 0 {
-                merge_pb.set_message(format!(
-                    "| 🔄 Writing to tar: {}/{}",
-                    index + 1,
-                    local_chunks.len()
-                ));
-            }
         }
         tar_file.flush().await?;
         merge_pb.finish_with_message(format!(
