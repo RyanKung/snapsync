@@ -237,8 +237,6 @@ async fn verify_local_file(filename: &str, remote_url: &str) -> Result<bool, Sna
         .and_then(|n| n.to_str())
         .unwrap_or(filename);
 
-    info!("🔍 Verifying existing file: {}", file_display_name);
-
     // Check if local file exists
     let local_metadata = match tokio::fs::metadata(filename).await {
         Ok(m) => m,
@@ -354,8 +352,6 @@ async fn download_file_simple(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(filename);
-
-    info!("📥 Downloading {}", file_display_name);
 
     // Create parent directory if needed
     if let Some(parent) = std::path::Path::new(filename).parent() {
@@ -525,9 +521,11 @@ pub async fn download_snapshots(
             let filename = format!("{}/shard-{}/{}", snapshot_dir, shard_id, chunk);
 
             // Check if file already exists and is valid (resumable download support)
+            let chunk_display_name = chunk.clone();
             match verify_local_file(&filename, &download_path).await {
                 Ok(true) => {
                     // File is already downloaded and verified, skip download
+                    pb.set_message(format!("| ✅ Verified: {}", chunk_display_name));
                     pb.inc(1);
                     filenames_in_order.push(filename);
                     continue;
@@ -553,10 +551,7 @@ pub async fn download_snapshots(
                 let _permit = semaphore.acquire().await.unwrap();
 
                 // Update progress message with current chunk info
-                pb_clone.set_message(format!(
-                    "| Shard {}/{} | {}",
-                    shard_idx, total_shards, chunk_name
-                ));
+                pb_clone.set_message(format!("| ⬇️  Downloading: {}", chunk_name));
 
                 let retry_strategy =
                     tokio_retry2::strategy::FixedInterval::from_millis(10_000).take(5);
