@@ -97,6 +97,11 @@ pub struct DownloadConfig {
     /// even low-core CPUs can handle 8-16 concurrent downloads efficiently.
     /// The limiting factor is network bandwidth, not CPU.
     pub max_concurrent_downloads: usize,
+    /// Skip MD5 verification, only check file size (default: false).
+    ///
+    /// When enabled, files are only verified by size comparison, which is much
+    /// faster (~50-1000x) but less reliable. Use with caution for trusted sources.
+    pub skip_verify: bool,
 }
 
 impl Default for DownloadConfig {
@@ -107,6 +112,7 @@ impl Default for DownloadConfig {
             snapshot_download_dir: ".rocks.snapshot".to_string(),
             network: "FARCASTER_NETWORK_MAINNET".to_string(),
             max_concurrent_downloads: 4,
+            skip_verify: false,
         }
     }
 }
@@ -242,7 +248,11 @@ async fn compute_file_md5(filename: &str) -> Result<String, SnapshotError> {
 /// `Ok(true)` if the file is valid and doesn't need re-downloading,
 /// `Ok(false)` if the file needs to be downloaded,
 /// `Err` on verification errors.
-async fn verify_local_file(filename: &str, remote_url: &str) -> Result<bool, SnapshotError> {
+async fn verify_local_file(
+    filename: &str,
+    remote_url: &str,
+    skip_verify: bool,
+) -> Result<bool, SnapshotError> {
     let file_display_name = std::path::Path::new(filename)
         .file_name()
         .and_then(|n| n.to_str())
@@ -299,6 +309,16 @@ async fn verify_local_file(filename: &str, remote_url: &str) -> Result<bool, Sna
         .get("etag")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim_matches('"'));
+
+    // If skip_verify is enabled, only check file size
+    if skip_verify {
+        info!(
+            "✅ File {} verified (size match, {} bytes, MD5 skipped)",
+            file_display_name,
+            local_metadata.len()
+        );
+        return Ok(true);
+    }
 
     // Verify MD5 if ETag is available
     if let Some(etag_val) = etag {
@@ -536,7 +556,7 @@ pub async fn download_snapshots(
 
             // Check if file already exists and is valid (resumable download support)
             let chunk_display_name = chunk.clone();
-            match verify_local_file(&filename, &download_path).await {
+            match verify_local_file(&filename, &download_path, config.skip_verify).await {
                 Ok(true) => {
                     // File is already downloaded and verified, skip download
                     pb.set_message(format!("| ✅ Verified: {}", chunk_display_name));
@@ -623,7 +643,20 @@ pub async fn download_snapshots(
         let tar_filename = format!("{}/shard_{}_snapshot.tar", snapshot_dir, shard_id);
         let mut tar_file = BufWriter::new(tokio::fs::File::create(tar_filename.clone()).await?);
 
-        for filename in local_chunks {
+        let total_files = local_chunks.len();
+        for (index, filename) in local_chunks.iter().enumerate() {
+            // Update progress for merging
+            let chunk_name = std::path::Path::new(filename)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            pb.set_message(format!(
+                "| 🔄 Merging: {}/{} | {}",
+                index + 1,
+                total_files,
+                chunk_name
+            ));
+
             let file = std::fs::File::open(filename)?;
             let reader = std::io::BufReader::new(file);
             let mut gz_decoder = GzDecoder::new(reader);

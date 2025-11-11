@@ -44,6 +44,10 @@ struct Args {
     /// Number of concurrent downloads (default: 4)
     #[arg(short, long, default_value = "4")]
     workers: usize,
+
+    /// Skip MD5 verification, only check file size (faster but less safe)
+    #[arg(long)]
+    skip_verify: bool,
 }
 
 #[tokio::main]
@@ -75,6 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         snapshot_download_dir: args.temp_dir,
         network: args.network,
         max_concurrent_downloads: args.workers,
+        skip_verify: args.skip_verify,
     };
 
     let db_dir = args.output.to_str().unwrap().to_string();
