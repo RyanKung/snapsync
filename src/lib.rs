@@ -266,6 +266,16 @@ async fn verify_local_file(
         Err(_) => return Ok(false), // File doesn't exist, need to download
     };
 
+    // If skip_verify is enabled, trust the file completely without any checks
+    if skip_verify {
+        info!(
+            "✅ File {} trusted (exists, {} bytes, verification skipped)",
+            file_display_name,
+            local_metadata.len()
+        );
+        return Ok(true);
+    }
+
     // Send HEAD request to get remote file info
     let client = reqwest::Client::new();
     let response = match client.head(remote_url).send().await {
@@ -311,16 +321,6 @@ async fn verify_local_file(
         .get("etag")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim_matches('"'));
-
-    // If skip_verify is enabled, only check file size
-    if skip_verify {
-        info!(
-            "✅ File {} verified (size match, {} bytes, MD5 skipped)",
-            file_display_name,
-            local_metadata.len()
-        );
-        return Ok(true);
-    }
 
     // Verify MD5 if ETag is available
     if let Some(etag_val) = etag {
