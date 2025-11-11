@@ -187,9 +187,26 @@ pub async fn download_snapshots(
 
         // Count entries first to set progress bar length
         info!("Counting files in tar archive for shard {}...", shard_id);
+
+        // Show spinner during counting (can take 5-10 minutes for large tar files)
+        let count_spinner = indicatif::ProgressBar::new_spinner();
+        count_spinner.set_style(
+            indicatif::ProgressStyle::default_spinner()
+                .template("{spinner:.cyan} {msg}")
+                .unwrap(),
+        );
+        count_spinner.set_message(format!(
+            "🔍 Counting files in tar archive for shard {} (this may take several minutes)...",
+            shard_id
+        ));
+        count_spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
         let file_for_count = std::fs::File::open(&tar_filename)?;
         let mut archive_for_count = tar::Archive::new(file_for_count);
         let total_entries = archive_for_count.entries()?.count();
+
+        count_spinner.finish_and_clear();
+        info!("✅ Found {} files in tar archive", total_entries);
 
         // Create and configure extract progress bar
         let extract_pb = indicatif::ProgressBar::new(total_entries as u64);
