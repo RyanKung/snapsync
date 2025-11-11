@@ -33,14 +33,17 @@ pub(crate) fn extract_tar(
         let path = entry.path()?;
         let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
+        file_count = (index + 1) as u64;
+
         // Update message more frequently at the beginning, then every 100 files
         if index < 10 || index % 100 == 0 {
-            extract_pb.set_message(format!("| 📂 Extracting: {} | {}", index + 1, file_name));
+            extract_pb.set_message(format!(
+                "📂 Extracting: {} files | {}",
+                file_count, file_name
+            ));
         }
 
         entry.unpack_in(db_dir)?;
-        file_count = (index + 1) as u64;
-        extract_pb.set_position(file_count);
     }
 
     extract_pb.finish_with_message(format!("✅ Extracted {} files to {}", file_count, db_dir));

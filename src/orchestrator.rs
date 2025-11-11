@@ -204,11 +204,11 @@ pub async fn download_snapshots(
         let extract_pb = indicatif::ProgressBar::new_spinner();
         extract_pb.set_style(
             indicatif::ProgressStyle::default_spinner()
-                .template("{spinner:.cyan} {msg} {pos} files | {elapsed_precise} elapsed")
+                .template("{spinner:.cyan} {msg} | {elapsed_precise} elapsed")
                 .unwrap(),
         );
         extract_pb.set_message(format!(
-            "📂 Extracting shard {} (~{} files estimated)...",
+            "📂 Extracting shard {} (~{} files estimated)",
             shard_id, estimated_files
         ));
         extract_pb.enable_steady_tick(std::time::Duration::from_millis(100));
