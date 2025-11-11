@@ -660,43 +660,58 @@ pub async fn download_snapshots(
         let tar_filename = format!("{}/shard_{}_snapshot.tar", snapshot_dir, shard_id);
         let mut tar_file = BufWriter::new(tokio::fs::File::create(tar_filename.clone()).await?);
 
-        // Process files sequentially with minimal memory footprint
-        // Decompress and write immediately instead of buffering all in memory
+        // Use sliding window for parallel decompression with controlled memory
         let total_files = local_chunks.len();
+        let window_size = 8; // Process 8 files concurrently (max ~400-800MB memory)
 
-        for (index, filename) in local_chunks.iter().enumerate() {
-            let chunk_name = std::path::Path::new(filename)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+        let mut current_index = 0;
+        let mut pending_tasks: Vec<tokio::task::JoinHandle<Result<Vec<u8>, SnapshotError>>> =
+            Vec::new();
 
-            merge_pb.set_message(format!(
-                "| 🔄 Processing: {}/{} | {}",
-                index + 1,
-                total_files,
-                chunk_name
-            ));
+        while current_index < total_files || !pending_tasks.is_empty() {
+            // Spawn new tasks up to window size
+            while pending_tasks.len() < window_size && current_index < total_files {
+                let filename = local_chunks[current_index].clone();
+                let index = current_index;
+                let merge_pb_clone = merge_pb.clone();
 
-            // Decompress in blocking task to avoid blocking async runtime
-            let filename_clone = filename.clone();
-            let buffer = tokio::task::spawn_blocking(move || {
-                let file = std::fs::File::open(&filename_clone).map_err(SnapshotError::IoError)?;
-                let reader = std::io::BufReader::with_capacity(4 * 1024 * 1024, file);
-                let mut gz_decoder = GzDecoder::new(reader);
-                let mut buffer = Vec::new();
-                gz_decoder
-                    .read_to_end(&mut buffer)
-                    .map_err(SnapshotError::IoError)?;
-                Ok::<Vec<u8>, SnapshotError>(buffer)
-            })
-            .await
-            .map_err(|e| {
-                SnapshotError::IoError(std::io::Error::other(format!("Task join error: {}", e)))
-            })??;
+                let task = tokio::task::spawn_blocking(move || {
+                    let chunk_name = std::path::Path::new(&filename)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
 
-            // Write immediately to tar, then buffer is dropped
-            tar_file.write_all(&buffer).await?;
-            merge_pb.inc(1);
+                    merge_pb_clone.set_message(format!(
+                        "| 🔄 Decompressing: {}/{} | {}",
+                        index + 1,
+                        total_files,
+                        chunk_name
+                    ));
+
+                    let file = std::fs::File::open(&filename).map_err(SnapshotError::IoError)?;
+                    let reader = std::io::BufReader::with_capacity(4 * 1024 * 1024, file);
+                    let mut gz_decoder = GzDecoder::new(reader);
+                    let mut buffer = Vec::new();
+                    gz_decoder
+                        .read_to_end(&mut buffer)
+                        .map_err(SnapshotError::IoError)?;
+                    Ok::<Vec<u8>, SnapshotError>(buffer)
+                });
+
+                pending_tasks.push(task);
+                current_index += 1;
+            }
+
+            // Wait for first task to complete and write it
+            if !pending_tasks.is_empty() {
+                let task = pending_tasks.remove(0);
+                let buffer = task.await.map_err(|e| {
+                    SnapshotError::IoError(std::io::Error::other(format!("Task join error: {}", e)))
+                })??;
+
+                tar_file.write_all(&buffer).await?;
+                merge_pb.inc(1);
+            }
         }
         tar_file.flush().await?;
         merge_pb.finish_with_message(format!(
