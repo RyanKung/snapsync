@@ -80,7 +80,8 @@ struct SnapshotMetadata {
 ///     snapshot_download_url: "https://example.com".to_string(),
 ///     snapshot_download_dir: ".temp".to_string(),
 ///     network: "FARCASTER_NETWORK_MAINNET".to_string(),
-///     max_concurrent_downloads: 8, // Use 8 parallel workers
+///     max_concurrent_downloads: 8,
+///     skip_verify: false,
 /// };
 /// ```
 #[derive(Debug, Clone)]
