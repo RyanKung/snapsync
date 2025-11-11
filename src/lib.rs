@@ -496,7 +496,7 @@ pub async fn download_snapshots(
         let mut download_tasks = vec![];
         let mut filenames_in_order = vec![];
 
-        for (chunk_index, chunk) in metadata_json.chunks.iter().enumerate() {
+        for (_chunk_index, chunk) in metadata_json.chunks.iter().enumerate() {
             let download_path = format!("{}/{}/{}", config.snapshot_download_url, base_path, chunk);
             let filename = format!("{}/shard-{}/{}", snapshot_dir, shard_id, chunk);
 
@@ -518,7 +518,7 @@ pub async fn download_snapshots(
             let pb_clone = pb.clone();
             let shard_idx = shard_ids.iter().position(|&s| s == shard_id).unwrap() + 1;
             let total_shards = shard_ids.len();
-            let total_chunks_in_shard = metadata_json.chunks.len();
+            let _total_chunks_in_shard = metadata_json.chunks.len();
             let chunk_name = chunk.clone();
             let filename_clone = filename.clone();
 
