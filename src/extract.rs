@@ -38,17 +38,20 @@ pub(crate) fn extract_tar(
     // Extract entries with progress
     for (index, entry) in archive.entries()?.enumerate() {
         let mut entry = entry?;
-        let entry_path = entry.path()?;
+        
+        // Extract metadata before checking (to avoid borrow conflicts)
+        let entry_path = entry.path()?.to_path_buf();
         let file_name = entry_path
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("");
+            .unwrap_or("")
+            .to_string();
+        let expected_size = entry.header().size()?;
 
         file_count = (index + 1) as u64;
 
         // Check if file already exists with correct size
         let target_path = db_path.join(&entry_path);
-        let expected_size = entry.header().size()?;
 
         let should_extract = if target_path.exists() {
             match std::fs::metadata(&target_path) {
