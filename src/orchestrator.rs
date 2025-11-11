@@ -200,18 +200,15 @@ pub async fn download_snapshots(
             tar_size_gb, estimated_files
         );
 
-        // Create progress bar with estimated count (will show actual count as we extract)
-        let extract_pb = indicatif::ProgressBar::new_spinner();
+        // Create progress bar with estimated total for ETA calculation
+        let extract_pb = indicatif::ProgressBar::new(estimated_files);
         extract_pb.set_style(
-            indicatif::ProgressStyle::default_spinner()
-                .template("{spinner:.cyan} {msg} | {elapsed_precise} elapsed")
-                .unwrap(),
+            indicatif::ProgressStyle::default_bar()
+                .template("{spinner:.cyan} [{bar:40.cyan/blue}] {pos}/{len} {msg} | {elapsed_precise} elapsed, ETA {eta_precise}")
+                .unwrap()
+                .progress_chars("█▓▒░ "),
         );
-        extract_pb.set_message(format!(
-            "📂 Extracting shard {} (~{} files estimated)",
-            shard_id, estimated_files
-        ));
-        extract_pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        extract_pb.set_message(format!("📂 Extracting shard {}", shard_id));
 
         extract_tar(&tar_filename, &db_dir, &extract_pb, shard_id)?;
     }
