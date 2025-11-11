@@ -202,30 +202,26 @@ async fn compute_file_md5(filename: &str) -> Result<String, SnapshotError> {
     tokio::task::spawn_blocking(move || {
         use std::io::Read;
 
-        let file = std::fs::File::open(&filename).map_err(|e| SnapshotError::IoError(e))?;
+        let file = std::fs::File::open(&filename).map_err(SnapshotError::IoError)?;
         let mut reader = std::io::BufReader::with_capacity(1024 * 1024, file);
-        let mut hasher = md5::Context::new();
+        use md5::{Digest, Md5};
+
+        let mut hasher = Md5::new();
         let mut buffer = vec![0u8; 1024 * 1024];
 
         loop {
-            let n = reader
-                .read(&mut buffer)
-                .map_err(|e| SnapshotError::IoError(e))?;
+            let n = reader.read(&mut buffer).map_err(SnapshotError::IoError)?;
             if n == 0 {
                 break;
             }
-            hasher.consume(&buffer[..n]);
+            hasher.update(&buffer[..n]);
         }
 
-        Ok(format!("{:x}", hasher.compute()))
+        let digest = hasher.finalize();
+        Ok(format!("{:x}", digest))
     })
     .await
-    .map_err(|e| {
-        SnapshotError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Task join error: {}", e),
-        ))
-    })?
+    .map_err(|e| SnapshotError::IoError(std::io::Error::other(format!("Task join error: {}", e))))?
 }
 
 /// Verifies if a local file matches the remote file.
@@ -387,7 +383,8 @@ async fn download_file_simple(
     // Stream download and compute MD5 simultaneously
     let mut byte_stream = download_response.bytes_stream();
     let mut hasher = if etag.is_some() {
-        Some(md5::Context::new())
+        use md5::Digest;
+        Some(md5::Md5::new())
     } else {
         None
     };
@@ -397,7 +394,8 @@ async fn download_file_simple(
 
         // Update MD5 hash
         if let Some(ref mut h) = hasher {
-            h.consume(&chunk);
+            use md5::Digest;
+            h.update(&chunk);
         }
 
         file.write_all(&chunk).await?;
@@ -427,8 +425,9 @@ async fn download_file_simple(
     if let (Some(expected_etag), Some(hasher)) = (etag, hasher) {
         // Skip multipart uploads (they have "-" in ETag)
         if !expected_etag.contains('-') {
+            use md5::Digest;
             info!("🔍 Verifying MD5 for {}", file_display_name);
-            let computed_md5 = format!("{:x}", hasher.compute());
+            let computed_md5 = format!("{:x}", hasher.finalize());
 
             if computed_md5 != expected_etag {
                 // MD5 mismatch - delete corrupted file
@@ -531,7 +530,7 @@ pub async fn download_snapshots(
         let mut download_tasks = vec![];
         let mut filenames_in_order = vec![];
 
-        for (_chunk_index, chunk) in metadata_json.chunks.iter().enumerate() {
+        for chunk in &metadata_json.chunks {
             let download_path = format!("{}/{}/{}", config.snapshot_download_url, base_path, chunk);
             let filename = format!("{}/shard-{}/{}", snapshot_dir, shard_id, chunk);
 
