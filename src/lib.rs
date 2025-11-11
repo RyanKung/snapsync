@@ -1,6 +1,32 @@
+//! SnapSync - Fast, reliable RocksDB snapshot downloader with resumable downloads
+//!
+//! This library provides functionality for downloading and restoring RocksDB snapshots
+//! from S3/R2 storage with built-in MD5 verification and resumable download support.
+//!
+//! # Features
+//!
+//! - **Resumable Downloads**: Automatically resume interrupted downloads
+//! - **MD5 Verification**: Verify data integrity using ETag/MD5 checksums
+//! - **Multi-Shard Support**: Download multiple shards efficiently
+//! - **Progress Tracking**: Real-time progress reporting
+//! - **Automatic Retry**: Built-in retry logic for transient failures
+//!
+//! # Example
+//!
+//! ```no_run
+//! use snapsync::{download_snapshots, DownloadConfig};
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = DownloadConfig::default();
+//! let shard_ids = vec![0, 1];
+//!
+//! download_snapshots(&config, ".rocks".to_string(), shard_ids).await?;
+//! # Ok(())
+//! # }
+//! ```
+
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
-use md5;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, BufReader, Read};
@@ -12,28 +38,50 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio_retry2::{Retry, RetryError};
 use tracing::{error, info, warn};
 
+/// Errors that can occur during snapshot operations.
 #[derive(Error, Debug)]
 pub enum SnapshotError {
+    /// I/O error during file operations.
     #[error(transparent)]
     IoError(#[from] io::Error),
 
+    /// HTTP request error during download.
     #[error(transparent)]
     ReqwestError(#[from] reqwest::Error),
 
+    /// JSON serialization/deserialization error.
     #[error(transparent)]
     SerdeJsonError(#[from] serde_json::Error),
 
+    /// General snapshot download failure.
     #[error("Snapshot download failed: {0}")]
     DownloadFailed(String),
 }
 
+/// Metadata for a snapshot, describing its location and chunks.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct SnapshotMetadata {
+    /// Base path for the snapshot in S3/R2 storage.
     key_base: String,
+    /// List of chunk filenames to download.
     chunks: Vec<String>,
+    /// Unix timestamp when the snapshot was created.
     timestamp: i64,
 }
 
+/// Configuration for downloading snapshots.
+///
+/// # Example
+///
+/// ```
+/// use snapsync::DownloadConfig;
+///
+/// let config = DownloadConfig {
+///     snapshot_download_url: "https://example.com".to_string(),
+///     snapshot_download_dir: ".temp".to_string(),
+///     network: "MAINNET".to_string(),
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct DownloadConfig {
     /// Base URL for snapshot downloads (e.g., "https://pub-xxx.r2.dev")
@@ -55,10 +103,31 @@ impl Default for DownloadConfig {
     }
 }
 
+/// Constructs the S3/R2 path to the metadata file for a given network and shard.
+///
+/// # Arguments
+///
+/// * `network` - The network name (e.g., "MAINNET", "TESTNET")
+/// * `shard_id` - The shard identifier
+///
+/// # Returns
+///
+/// The path to the `latest.json` metadata file.
 fn metadata_path(network: &str, shard_id: u32) -> String {
     format!("{}/{}/latest.json", network, shard_id)
 }
 
+/// Downloads and parses the snapshot metadata for a shard.
+///
+/// # Arguments
+///
+/// * `network` - The network name
+/// * `shard_id` - The shard identifier
+/// * `config` - Download configuration
+///
+/// # Returns
+///
+/// The parsed metadata or an error.
 async fn download_metadata(
     network: &str,
     shard_id: u32,
@@ -77,7 +146,18 @@ async fn download_metadata(
     Ok(metadata)
 }
 
-/// Compute MD5 hash of a local file
+/// Computes the MD5 hash of a local file.
+///
+/// This function reads the file in chunks to avoid loading large files
+/// entirely into memory.
+///
+/// # Arguments
+///
+/// * `filename` - Path to the file
+///
+/// # Returns
+///
+/// The MD5 hash as a hexadecimal string, or an error.
 async fn compute_file_md5(filename: &str) -> Result<String, SnapshotError> {
     let mut file = tokio::fs::File::open(filename).await?;
     let mut hasher = md5::Context::new();
@@ -94,8 +174,24 @@ async fn compute_file_md5(filename: &str) -> Result<String, SnapshotError> {
     Ok(format!("{:x}", hasher.compute()))
 }
 
-/// Verify if a local file matches the remote file (by checking size and MD5 via HEAD request)
-/// Returns Ok(true) if the file is valid and doesn't need re-downloading
+/// Verifies if a local file matches the remote file.
+///
+/// This function performs the following checks:
+/// 1. Checks if the local file exists
+/// 2. Sends a HEAD request to get remote file size and ETag
+/// 3. Compares file sizes
+/// 4. If ETag is available, computes local MD5 and compares
+///
+/// # Arguments
+///
+/// * `filename` - Path to the local file
+/// * `remote_url` - URL of the remote file
+///
+/// # Returns
+///
+/// `Ok(true)` if the file is valid and doesn't need re-downloading,
+/// `Ok(false)` if the file needs to be downloaded,
+/// `Err` on verification errors.
 async fn verify_local_file(filename: &str, remote_url: &str) -> Result<bool, SnapshotError> {
     // Check if local file exists
     let local_metadata = match tokio::fs::metadata(filename).await {
@@ -157,7 +253,7 @@ async fn verify_local_file(filename: &str, remote_url: &str) -> Result<bool, Sna
                 if local_md5 == etag_val {
                     info!(
                         "✓ File {} already verified (MD5: {})",
-                        filename.split('/').last().unwrap_or(filename),
+                        filename.split('/').next_back().unwrap_or(filename),
                         local_md5
                     );
                     return Ok(true);
@@ -179,12 +275,26 @@ async fn verify_local_file(filename: &str, remote_url: &str) -> Result<bool, Sna
     // No ETag available, but size matches - assume valid
     info!(
         "File {} size matches ({} bytes), assuming valid (no ETag available)",
-        filename.split('/').last().unwrap_or(filename),
+        filename.split('/').next_back().unwrap_or(filename),
         local_metadata.len()
     );
     Ok(true)
 }
 
+/// Downloads a file from a URL with MD5 verification and progress tracking.
+///
+/// # Arguments
+///
+/// * `url` - The URL to download from
+/// * `filename` - The local filename to save to
+/// * `chunk_pb` - Progress bar for this specific chunk
+/// * `main_pb` - Overall progress bar
+/// * `use_progress_bars` - Whether to display progress bars
+/// * `global_start` - Start time for ETA calculation
+///
+/// # Returns
+///
+/// `Ok(())` on successful download and verification, or an error.
 async fn download_file(
     url: &str,
     filename: &str,
@@ -224,7 +334,7 @@ async fn download_file(
             };
             info!(
                 "Starting download of {} ({} bytes){}",
-                filename.split('/').last().unwrap_or(filename),
+                filename.split('/').next_back().unwrap_or(filename),
                 length,
                 verify_msg
             );
@@ -238,7 +348,13 @@ async fn download_file(
             .unwrap()
             .progress_chars("=>-"),
     );
-    chunk_pb.set_message(filename.split('/').last().unwrap_or(filename).to_string());
+    chunk_pb.set_message(
+        filename
+            .split('/')
+            .next_back()
+            .unwrap_or(filename)
+            .to_string(),
+    );
 
     // Stream download and compute MD5 simultaneously
     let mut byte_stream = download_response.bytes_stream();
@@ -302,12 +418,12 @@ async fn download_file(
         info!(
             "✓ MD5 verified: {} for {}",
             computed_md5,
-            filename.split('/').last().unwrap_or(filename)
+            filename.split('/').next_back().unwrap_or(filename)
         );
     } else {
         info!(
             "No ETag available for {}, skipping MD5 verification (size verified)",
-            filename.split('/').last().unwrap_or(filename)
+            filename.split('/').next_back().unwrap_or(filename)
         );
     }
 
@@ -349,6 +465,37 @@ async fn download_file(
     Ok(())
 }
 
+/// Downloads and restores RocksDB snapshots for the specified shards.
+///
+/// This is the main entry point for downloading snapshots. It performs the following steps:
+///
+/// 1. Fetches metadata for all requested shards
+/// 2. Downloads chunks with resumable support (skips verified files)
+/// 3. Decompresses and merges chunks into tar archives
+/// 4. Extracts tar archives to the RocksDB directory
+/// 5. Cleans up temporary files
+///
+/// # Arguments
+///
+/// * `config` - Download configuration
+/// * `db_dir` - Target directory for RocksDB data
+/// * `shard_ids` - List of shard IDs to download
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error if any step fails.
+///
+/// # Example
+///
+/// ```no_run
+/// use snapsync::{download_snapshots, DownloadConfig};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = DownloadConfig::default();
+/// download_snapshots(&config, ".rocks".to_string(), vec![0, 1]).await?;
+/// # Ok(())
+/// # }
+/// ```
 pub async fn download_snapshots(
     config: &DownloadConfig,
     db_dir: String,
@@ -422,10 +569,7 @@ pub async fn download_snapshots(
                 String::new()
             };
 
-            let download_path = format!(
-                "{}/{}/{}",
-                config.snapshot_download_url, base_path, chunk
-            );
+            let download_path = format!("{}/{}/{}", config.snapshot_download_url, base_path, chunk);
 
             let filename = format!("{}/shard-{}/{}", snapshot_dir, shard_id, chunk);
 
@@ -471,8 +615,7 @@ pub async fn download_snapshots(
                 indicatif::ProgressBar::hidden()
             };
 
-            let retry_strategy =
-                tokio_retry2::strategy::FixedInterval::from_millis(10_000).take(5);
+            let retry_strategy = tokio_retry2::strategy::FixedInterval::from_millis(10_000).take(5);
             // Directly await the download of the current chunk before proceeding to the next
             let result = Retry::spawn(retry_strategy, || {
                 let download_path_clone = download_path.clone();
@@ -506,7 +649,7 @@ pub async fn download_snapshots(
             if let Err(e) = result {
                 error!("Failed to download snapshot chunk {}: {}", filename, e);
                 main_pb.finish_with_message("Download failed!");
-                return Err(SnapshotError::from(e));
+                return Err(e);
             }
             local_chunks.push(filename);
         }
@@ -543,4 +686,3 @@ pub async fn download_snapshots(
     std::fs::remove_dir_all(snapshot_dir)?;
     Ok(())
 }
-

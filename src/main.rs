@@ -1,9 +1,14 @@
+//! SnapSync CLI - Command-line interface for downloading RocksDB snapshots
+//!
+//! This binary provides a user-friendly CLI for downloading and restoring
+//! RocksDB snapshots from S3/R2 storage.
+
 use clap::Parser;
 use snapsync::{download_snapshots, DownloadConfig};
 use std::path::PathBuf;
 use tracing::info;
-use tracing_subscriber;
 
+/// Command-line arguments for SnapSync.
 #[derive(Parser, Debug)]
 #[command(name = "snapsync")]
 #[command(about = "Download and restore RocksDB snapshots from S3/R2", long_about = None)]
@@ -22,7 +27,10 @@ struct Args {
     output: PathBuf,
 
     /// Snapshot download base URL
-    #[arg(long, default_value = "https://pub-d352dd8819104a778e20d08888c5a661.r2.dev")]
+    #[arg(
+        long,
+        default_value = "https://pub-d352dd8819104a778e20d08888c5a661.r2.dev"
+    )]
     snapshot_url: String,
 
     /// Temporary download directory
