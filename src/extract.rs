@@ -38,7 +38,7 @@ pub(crate) fn extract_tar(
     // Extract entries with progress
     for (index, entry) in archive.entries()?.enumerate() {
         let mut entry = entry?;
-        
+
         // Extract metadata before checking (to avoid borrow conflicts)
         let entry_path = entry.path()?.to_path_buf();
         let file_name = entry_path
@@ -91,11 +91,14 @@ pub(crate) fn extract_tar(
             extracted_count += 1;
         }
 
+        // Update progress bar position
+        extract_pb.set_position(file_count);
+
         // Update message more frequently at the beginning, then every 100 files
         if index < 10 || index % 100 == 0 {
             extract_pb.set_message(format!(
-                "📂 Extracting: {} files ({} new, {} skipped) | {}",
-                file_count, extracted_count, skipped_count, file_name
+                "| 📂 {} new, {} skipped | {}",
+                extracted_count, skipped_count, file_name
             ));
         }
     }
