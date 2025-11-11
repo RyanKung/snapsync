@@ -80,30 +80,33 @@ pub async fn download_snapshots(
         info!("Persisted metadata to {}", metadata_file_path);
     }
 
-    // Count total chunks for the progress bar
-    let total_chunks: usize = all_metadata.values().map(|m| m.chunks.len()).sum();
-
-    // Create a clean, single-line progress bar (more stable across terminals)
-    let pb = indicatif::ProgressBar::new(total_chunks as u64);
-    pb.set_style(
-        indicatif::ProgressStyle::default_bar()
-            .template("{spinner:.cyan} [{bar:40.cyan/blue}] {pos}/{len} {msg} | {elapsed_precise} elapsed, ETA {eta_precise}")
-            .unwrap()
-            .progress_chars("█▓▒░ "),
-    );
-    pb.set_message(format!(
-        "📦 Downloading {} chunks from {} shard(s)",
-        total_chunks,
-        shard_ids.len()
-    ));
-
-    // Create semaphore to limit concurrent downloads
-    let semaphore = Arc::new(Semaphore::new(config.max_concurrent_downloads));
-
-    // Skip download stage if requested
+    // Determine which stages to execute
     let should_download = stage == ExecutionStage::All || stage == ExecutionStage::DownloadOnly;
     let should_merge = stage == ExecutionStage::All || stage == ExecutionStage::MergeOnly;
     let should_extract = stage == ExecutionStage::All || stage == ExecutionStage::ExtractOnly;
+
+    // Create download progress bar only if downloading
+    let pb = if should_download {
+        let total_chunks: usize = all_metadata.values().map(|m| m.chunks.len()).sum();
+        let progress_bar = indicatif::ProgressBar::new(total_chunks as u64);
+        progress_bar.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("{spinner:.cyan} [{bar:40.cyan/blue}] {pos}/{len} {msg} | {elapsed_precise} elapsed, ETA {eta_precise}")
+                .unwrap()
+                .progress_chars("█▓▒░ "),
+        );
+        progress_bar.set_message(format!(
+            "📦 Downloading {} chunks from {} shard(s)",
+            total_chunks,
+            shard_ids.len()
+        ));
+        Some(progress_bar)
+    } else {
+        None
+    };
+
+    // Create semaphore to limit concurrent downloads
+    let semaphore = Arc::new(Semaphore::new(config.max_concurrent_downloads));
 
     // Process each shard sequentially
     for &shard_id in &shard_ids {
@@ -116,23 +119,25 @@ pub async fn download_snapshots(
         let mut filenames_in_order = vec![];
 
         if should_download {
-            let ctx = ShardDownloadContext {
-                config,
-                metadata: metadata_json,
-                snapshot_dir: &snapshot_dir,
-                shard_id,
-                base_path,
-                pb: &pb,
-                semaphore: &semaphore,
-                shard_ids: &shard_ids,
-            };
-            filenames_in_order = download_shard_chunks(ctx).await?;
+            if let Some(ref pb) = pb {
+                let ctx = ShardDownloadContext {
+                    config,
+                    metadata: metadata_json,
+                    snapshot_dir: &snapshot_dir,
+                    shard_id,
+                    base_path,
+                    pb,
+                    semaphore: &semaphore,
+                    shard_ids: &shard_ids,
+                };
+                filenames_in_order = download_shard_chunks(ctx).await?;
 
-            pb.finish_with_message(format!(
-                "✅ Downloaded {} chunks for shard {}",
-                filenames_in_order.len(),
-                shard_id
-            ));
+                pb.finish_with_message(format!(
+                    "✅ Downloaded {} chunks for shard {}",
+                    filenames_in_order.len(),
+                    shard_id
+                ));
+            }
         } else {
             // If not downloading, collect existing chunk files
             for chunk in &metadata_json.chunks {
@@ -180,25 +185,33 @@ pub async fn download_snapshots(
             continue;
         }
 
-        // Extract tar with progress tracking
-        let extract_pb = indicatif::ProgressBar::new(0);
+        // Count entries first to set progress bar length
+        info!("Counting files in tar archive for shard {}...", shard_id);
+        let file_for_count = std::fs::File::open(&tar_filename)?;
+        let mut archive_for_count = tar::Archive::new(file_for_count);
+        let total_entries = archive_for_count.entries()?.count();
+
+        // Create and configure extract progress bar
+        let extract_pb = indicatif::ProgressBar::new(total_entries as u64);
         extract_pb.set_style(
             indicatif::ProgressStyle::default_bar()
                 .template("{spinner:.cyan} [{bar:40.cyan/blue}] {pos}/{len} {msg} | {elapsed_precise} elapsed, ETA {eta_precise}")
                 .unwrap()
                 .progress_chars("█▓▒░ "),
         );
-
-        // Count entries first
-        let file_for_count = std::fs::File::open(&tar_filename)?;
-        let mut archive_for_count = tar::Archive::new(file_for_count);
-        let total_entries = archive_for_count.entries()?.count();
-        extract_pb.set_length(total_entries as u64);
+        extract_pb.set_message(format!(
+            "📂 Extracting shard {} ({} files)",
+            shard_id, total_entries
+        ));
 
         extract_tar(&tar_filename, &db_dir, &extract_pb, shard_id)?;
     }
 
-    pb.finish_with_message("✅ All snapshots downloaded and extracted successfully!");
+    if let Some(pb) = pb {
+        pb.finish_with_message("✅ All snapshots downloaded and extracted successfully!");
+    } else {
+        info!("✅ All operations completed successfully!");
+    }
     Ok(())
 }
 
