@@ -723,20 +723,44 @@ pub async fn download_snapshots(
             shard_id
         ));
 
-        // Create progress bar for extraction
-        let extract_pb = indicatif::ProgressBar::new_spinner();
-        extract_pb.set_style(
-            indicatif::ProgressStyle::default_spinner()
-                .template("{spinner:.cyan} {msg}")
-                .unwrap(),
-        );
-        extract_pb.set_message(format!("📂 Extracting shard {} to disk...", shard_id));
-
+        // Extract tar with progress tracking
         let file = std::fs::File::open(tar_filename.clone())?;
         let mut archive = Archive::new(file);
         std::fs::create_dir_all(&db_dir)?;
-        archive.unpack(&db_dir)?;
-        extract_pb.finish_with_message(format!("✅ Extracted shard {} to {}", shard_id, db_dir));
+
+        // Count entries for progress bar
+        let file_for_count = std::fs::File::open(tar_filename.clone())?;
+        let archive_for_count = Archive::new(file_for_count);
+        let total_entries = archive_for_count.entries()?.count();
+
+        // Create progress bar for extraction
+        let extract_pb = indicatif::ProgressBar::new(total_entries as u64);
+        extract_pb.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("{spinner:.cyan} [{bar:40.cyan/blue}] {pos}/{len} {msg} | {elapsed_precise} elapsed, ETA {eta_precise}")
+                .unwrap()
+                .progress_chars("█▓▒░ "),
+        );
+        extract_pb.set_message(format!("📂 Extracting shard {}", shard_id));
+
+        // Extract entries with progress
+        for (index, entry) in archive.entries()?.enumerate() {
+            let mut entry = entry?;
+            let path = entry.path()?;
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+            if index % 100 == 0 {
+                extract_pb.set_message(format!("| 📂 Extracting: {} | {}", index + 1, file_name));
+            }
+
+            entry.unpack_in(&db_dir)?;
+            extract_pb.inc(1);
+        }
+
+        extract_pb.finish_with_message(format!(
+            "✅ Extracted {} files to {}",
+            total_entries, db_dir
+        ));
     }
 
     pb.finish_with_message("✅ All snapshots downloaded and extracted successfully!");
