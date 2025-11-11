@@ -665,12 +665,14 @@ pub async fn download_snapshots(
         let mut decompress_tasks = vec![];
 
         for (index, filename) in local_chunks.iter().enumerate() {
-            let semaphore = Arc::clone(&semaphore);
+            // Acquire semaphore permit BEFORE spawning blocking task
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
             let filename = filename.clone();
             let merge_pb_clone = merge_pb.clone();
+            let total_files = local_chunks.len();
 
             let task = tokio::task::spawn_blocking(move || {
-                let _permit = semaphore.try_acquire().ok();
+                let _permit = permit; // Hold permit until task completes
 
                 // Update progress
                 let chunk_name = std::path::Path::new(&filename)
@@ -680,7 +682,7 @@ pub async fn download_snapshots(
                 merge_pb_clone.set_message(format!(
                     "| 🔄 Decompressing: {}/{} | {}",
                     index + 1,
-                    merge_pb_clone.length().unwrap_or(0),
+                    total_files,
                     chunk_name
                 ));
 
