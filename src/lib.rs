@@ -639,41 +639,104 @@ pub async fn download_snapshots(
 
         let local_chunks = filenames_in_order;
 
-        pb.set_message(format!("| 🔄 Merging shard {} chunks", shard_id));
+        // Finish download progress bar and create new one for merging
+        pb.finish_with_message(format!(
+            "✅ Downloaded {} chunks for shard {}",
+            local_chunks.len(),
+            shard_id
+        ));
+
+        // Create new progress bar for merging phase
+        let merge_pb = indicatif::ProgressBar::new(local_chunks.len() as u64);
+        merge_pb.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("{spinner:.cyan} [{bar:40.cyan/blue}] {pos}/{len} {msg} | {elapsed_precise} elapsed, ETA {eta_precise}")
+                .unwrap()
+                .progress_chars("█▓▒░ "),
+        );
+        merge_pb.set_message(format!("🔄 Merging shard {} chunks", shard_id));
 
         let tar_filename = format!("{}/shard_{}_snapshot.tar", snapshot_dir, shard_id);
         let mut tar_file = BufWriter::new(tokio::fs::File::create(tar_filename.clone()).await?);
 
-        let total_files = local_chunks.len();
-        for (index, filename) in local_chunks.iter().enumerate() {
-            // Update progress for merging
-            let chunk_name = std::path::Path::new(filename)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
-            pb.set_message(format!(
-                "| 🔄 Merging: {}/{} | {}",
-                index + 1,
-                total_files,
-                chunk_name
-            ));
+        // Parallel decompression with ordered writing
+        let semaphore = Arc::new(Semaphore::new(4)); // Limit parallel decompression
+        let mut decompress_tasks = vec![];
 
-            let file = std::fs::File::open(filename)?;
-            let reader = std::io::BufReader::new(file);
-            let mut gz_decoder = GzDecoder::new(reader);
-            let mut buffer = Vec::new();
-            // These files are small, 100MB max each
-            gz_decoder.read_to_end(&mut buffer)?;
+        for (index, filename) in local_chunks.iter().enumerate() {
+            let semaphore = Arc::clone(&semaphore);
+            let filename = filename.clone();
+            let merge_pb_clone = merge_pb.clone();
+
+            let task = tokio::task::spawn_blocking(move || {
+                let _permit = semaphore.try_acquire().ok();
+
+                // Update progress
+                let chunk_name = std::path::Path::new(&filename)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                merge_pb_clone.set_message(format!(
+                    "| 🔄 Decompressing: {}/{} | {}",
+                    index + 1,
+                    merge_pb_clone.length().unwrap_or(0),
+                    chunk_name
+                ));
+
+                // Decompress file
+                let file = std::fs::File::open(&filename).map_err(SnapshotError::IoError)?;
+                let reader = std::io::BufReader::with_capacity(4 * 1024 * 1024, file); // 4MB buffer
+                let mut gz_decoder = GzDecoder::new(reader);
+                let mut buffer = Vec::new();
+                gz_decoder
+                    .read_to_end(&mut buffer)
+                    .map_err(SnapshotError::IoError)?;
+
+                Ok::<Vec<u8>, SnapshotError>(buffer)
+            });
+
+            decompress_tasks.push(task);
+        }
+
+        // Wait for decompression and write to tar in order
+        for (index, task) in decompress_tasks.into_iter().enumerate() {
+            let buffer = task.await.map_err(|e| {
+                SnapshotError::IoError(std::io::Error::other(format!("Task join error: {}", e)))
+            })??;
+
             tar_file.write_all(&buffer).await?;
+            merge_pb.inc(1);
+
+            // Update progress message
+            if index % 10 == 0 {
+                merge_pb.set_message(format!(
+                    "| 🔄 Writing to tar: {}/{}",
+                    index + 1,
+                    local_chunks.len()
+                ));
+            }
         }
         tar_file.flush().await?;
+        merge_pb.finish_with_message(format!(
+            "✅ Merged {} chunks for shard {}",
+            local_chunks.len(),
+            shard_id
+        ));
 
-        pb.set_message(format!("| 📂 Extracting shard {} to disk", shard_id));
+        // Create progress bar for extraction
+        let extract_pb = indicatif::ProgressBar::new_spinner();
+        extract_pb.set_style(
+            indicatif::ProgressStyle::default_spinner()
+                .template("{spinner:.cyan} {msg}")
+                .unwrap(),
+        );
+        extract_pb.set_message(format!("📂 Extracting shard {} to disk...", shard_id));
 
         let file = std::fs::File::open(tar_filename.clone())?;
         let mut archive = Archive::new(file);
         std::fs::create_dir_all(&db_dir)?;
         archive.unpack(&db_dir)?;
+        extract_pb.finish_with_message(format!("✅ Extracted shard {} to {}", shard_id, db_dir));
     }
 
     pb.finish_with_message("✅ All snapshots downloaded and extracted successfully!");
