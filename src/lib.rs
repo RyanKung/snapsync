@@ -77,18 +77,18 @@ struct SnapshotMetadata {
 /// use snapsync::DownloadConfig;
 ///
 /// let config = DownloadConfig {
-///     snapshot_download_url: "https://example.com".to_string(),
+///     snapshot_download_url: "https://example.com".to_string(), // Use angle brackets in docs: <https://...>
 ///     snapshot_download_dir: ".temp".to_string(),
-///     network: "MAINNET".to_string(),
+///     network: "FARCASTER_NETWORK_MAINNET".to_string(),
 /// };
 /// ```
 #[derive(Debug, Clone)]
 pub struct DownloadConfig {
-    /// Base URL for snapshot downloads (e.g., "https://pub-xxx.r2.dev")
+    /// Base URL for snapshot downloads (e.g., `<https://pub-xxx.r2.dev>`)
     pub snapshot_download_url: String,
-    /// Temporary directory for downloads (e.g., ".rocks.snapshot")
+    /// Temporary directory for downloads (e.g., `".rocks.snapshot"`)
     pub snapshot_download_dir: String,
-    /// Network name (e.g., "MAINNET", "TESTNET")
+    /// Network name (e.g., `"FARCASTER_NETWORK_MAINNET"`, `"FARCASTER_NETWORK_TESTNET"`)
     pub network: String,
 }
 
