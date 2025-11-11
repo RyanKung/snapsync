@@ -730,7 +730,7 @@ pub async fn download_snapshots(
 
         // Count entries for progress bar
         let file_for_count = std::fs::File::open(tar_filename.clone())?;
-        let archive_for_count = Archive::new(file_for_count);
+        let mut archive_for_count = Archive::new(file_for_count);
         let total_entries = archive_for_count.entries()?.count();
 
         // Create progress bar for extraction
