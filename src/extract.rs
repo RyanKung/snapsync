@@ -9,7 +9,7 @@ use tar::Archive;
 ///
 /// * `tar_filename` - Path to the tar file
 /// * `db_dir` - Target directory for extraction
-/// * `extract_pb` - Progress bar for visual feedback
+/// * `extract_pb` - Progress bar for visual feedback (should be pre-configured with total length)
 /// * `shard_id` - Shard identifier for logging
 ///
 /// # Returns
@@ -25,12 +25,7 @@ pub(crate) fn extract_tar(
     let mut archive = Archive::new(file);
     std::fs::create_dir_all(db_dir)?;
 
-    // Count entries for progress bar
-    let file_for_count = std::fs::File::open(tar_filename)?;
-    let mut archive_for_count = Archive::new(file_for_count);
-    let total_entries = archive_for_count.entries()?.count();
-
-    extract_pb.set_message(format!("📂 Extracting shard {}", shard_id));
+    let total_entries = extract_pb.length().unwrap_or(0);
 
     // Extract entries with progress
     for (index, entry) in archive.entries()?.enumerate() {
@@ -38,7 +33,8 @@ pub(crate) fn extract_tar(
         let path = entry.path()?;
         let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-        if index % 100 == 0 {
+        // Update message more frequently at the beginning, then every 100 files
+        if index < 10 || index % 100 == 0 {
             extract_pb.set_message(format!("| 📂 Extracting: {} | {}", index + 1, file_name));
         }
 
