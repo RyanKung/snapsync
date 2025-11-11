@@ -19,7 +19,7 @@ pub(crate) fn extract_tar(
     tar_filename: &str,
     db_dir: &str,
     extract_pb: &indicatif::ProgressBar,
-    shard_id: u32,
+    _shard_id: u32,
 ) -> Result<(), SnapshotError> {
     let file = std::fs::File::open(tar_filename)?;
     let mut archive = Archive::new(file);
