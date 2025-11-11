@@ -1,6 +1,14 @@
-# SnapSync 🚀
-
-A fast, reliable tool for downloading and restoring RocksDB snapshots from S3/R2 storage.
+<div align="center">
+  <img src="logo.png" alt="SnapSync Logo" width="200"/>
+  
+  # SnapSync 🚀
+  
+  **A fast, reliable tool for downloading and restoring RocksDB snapshots from S3/R2 storage.**
+  
+  [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+  [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+  
+</div>
 
 ## Features
 
@@ -36,8 +44,8 @@ snapsync [OPTIONS]
 
 Options:
   -n, --network <NETWORK>
-          Network name (MAINNET, TESTNET, etc.)
-          [default: MAINNET]
+          Network name (FARCASTER_NETWORK_MAINNET, FARCASTER_NETWORK_TESTNET, FARCASTER_NETWORK_DEVNET)
+          [default: FARCASTER_NETWORK_MAINNET]
 
   -s, --shards <SHARDS>...
           Shard IDs to download (comma-separated, e.g., "0,1")
@@ -69,13 +77,16 @@ Options:
 #### Download mainnet shard 0 and 1
 
 ```bash
-snapsync --network MAINNET --shards 0,1 --output ./data/.rocks
+snapsync --network FARCASTER_NETWORK_MAINNET --shards 0,1 --output ./data/.rocks
+
+# Or use the default (FARCASTER_NETWORK_MAINNET)
+snapsync --shards 0,1 --output ./data/.rocks
 ```
 
 #### Download testnet shard 0 with verbose logging
 
 ```bash
-snapsync --network TESTNET --shards 0 --output ./testnet-data --verbose
+snapsync --network FARCASTER_NETWORK_TESTNET --shards 0 --output ./testnet-data --verbose
 ```
 
 #### Resume interrupted download
@@ -90,6 +101,22 @@ Simply run the same command again - SnapSync will:
 # This will resume from where it left off
 snapsync --shards 0,1 --output .rocks
 ```
+
+#### Compatible with Snapchain downloads
+
+SnapSync is **100% compatible** with Snapchain's original download logic:
+
+```bash
+# If you have partial downloads from Snapchain in .rocks.snapshot/
+# Just run SnapSync - it will verify and resume automatically
+snapsync --shards 0,1 --output .rocks --temp-dir .rocks.snapshot
+```
+
+SnapSync will:
+- ✅ Read existing `.rocks.snapshot/` directory
+- ✅ Verify all existing chunks via MD5
+- ✅ Skip verified files
+- ✅ Download only missing/corrupted chunks
 
 ## How It Works
 
@@ -180,7 +207,22 @@ cargo clippy
 
 ## License
 
-MIT OR Apache-2.0
+This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
+
+```
+SnapSync - Fast, reliable RocksDB snapshot downloader
+Copyright (C) 2024 Farcaster Team
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+```
 
 ## Contributing
 

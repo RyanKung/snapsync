@@ -98,7 +98,7 @@ impl Default for DownloadConfig {
             snapshot_download_url: "https://pub-d352dd8819104a778e20d08888c5a661.r2.dev"
                 .to_string(),
             snapshot_download_dir: ".rocks.snapshot".to_string(),
-            network: "MAINNET".to_string(),
+            network: "FARCASTER_NETWORK_MAINNET".to_string(),
         }
     }
 }
@@ -139,10 +139,40 @@ async fn download_metadata(
         metadata_path(network, shard_id)
     );
     info!("Retrieving metadata from {}", metadata_url);
-    let metadata = reqwest::get(metadata_url)
-        .await?
-        .json::<SnapshotMetadata>()
-        .await?;
+
+    let response = reqwest::get(&metadata_url).await?;
+
+    // Check HTTP status code
+    let status = response.status();
+    if !status.is_success() {
+        if status.as_u16() == 404 {
+            return Err(SnapshotError::DownloadFailed(format!(
+                "Snapshot not found for network '{}' shard {}. The metadata URL returned 404: {}\n\
+                 This usually means:\n\
+                 - The shard doesn't exist for this network\n\
+                 - The snapshot hasn't been created yet\n\
+                 - The URL is incorrect\n\
+                 Available shards for FARCASTER_NETWORK_MAINNET: 0, 1, 2\n\
+                 Available shards for FARCASTER_NETWORK_TESTNET: 0, 1",
+                network, shard_id, metadata_url
+            )));
+        } else {
+            return Err(SnapshotError::DownloadFailed(format!(
+                "Failed to fetch metadata from {}: HTTP {}",
+                metadata_url, status
+            )));
+        }
+    }
+
+    // Try to parse as JSON
+    let metadata = response.json::<SnapshotMetadata>().await.map_err(|e| {
+        SnapshotError::DownloadFailed(format!(
+            "Invalid metadata format from {}: {}\n\
+             Expected JSON with fields: key_base, chunks, timestamp",
+            metadata_url, e
+        ))
+    })?;
+
     Ok(metadata)
 }
 

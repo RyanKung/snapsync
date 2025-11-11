@@ -14,8 +14,8 @@ use tracing::info;
 #[command(about = "Download and restore RocksDB snapshots from S3/R2", long_about = None)]
 #[command(version)]
 struct Args {
-    /// Network name (MAINNET, TESTNET, etc.)
-    #[arg(short, long, default_value = "MAINNET")]
+    /// Network name (FARCASTER_NETWORK_MAINNET, FARCASTER_NETWORK_TESTNET, FARCASTER_NETWORK_DEVNET)
+    #[arg(short, long, default_value = "FARCASTER_NETWORK_MAINNET")]
     network: String,
 
     /// Shard IDs to download (comma-separated, e.g., "0,1")
