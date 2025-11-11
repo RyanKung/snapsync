@@ -33,7 +33,7 @@ use std::io::{self, Read};
 use std::sync::Arc;
 use tar::Archive;
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Semaphore;
 use tokio_retry2::{Retry, RetryError};
 use tracing::{error, info, warn};
@@ -197,20 +197,35 @@ async fn download_metadata(
 ///
 /// The MD5 hash as a hexadecimal string, or an error.
 async fn compute_file_md5(filename: &str) -> Result<String, SnapshotError> {
-    let file = tokio::fs::File::open(filename).await?;
-    let mut reader = BufReader::with_capacity(1024 * 1024, file); // 1MB buffer
-    let mut hasher = md5::Context::new();
-    let mut buffer = vec![0u8; 1024 * 1024]; // 1MB chunks for faster reading
+    let filename = filename.to_string();
 
-    loop {
-        let n = reader.read(&mut buffer).await?;
-        if n == 0 {
-            break;
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+
+        let file = std::fs::File::open(&filename).map_err(|e| SnapshotError::IoError(e))?;
+        let mut reader = std::io::BufReader::with_capacity(1024 * 1024, file);
+        let mut hasher = md5::Context::new();
+        let mut buffer = vec![0u8; 1024 * 1024];
+
+        loop {
+            let n = reader
+                .read(&mut buffer)
+                .map_err(|e| SnapshotError::IoError(e))?;
+            if n == 0 {
+                break;
+            }
+            hasher.consume(&buffer[..n]);
         }
-        hasher.consume(&buffer[..n]);
-    }
 
-    Ok(format!("{:x}", hasher.compute()))
+        Ok(format!("{:x}", hasher.compute()))
+    })
+    .await
+    .map_err(|e| {
+        SnapshotError::IoError(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Task join error: {}", e),
+        ))
+    })?
 }
 
 /// Verifies if a local file matches the remote file.
@@ -538,8 +553,8 @@ pub async fn download_snapshots(
             // Prepare download task
             let semaphore = Arc::clone(&semaphore);
             let pb_clone = pb.clone();
-            let shard_idx = shard_ids.iter().position(|&s| s == shard_id).unwrap() + 1;
-            let total_shards = shard_ids.len();
+            let _shard_idx = shard_ids.iter().position(|&s| s == shard_id).unwrap() + 1;
+            let _total_shards = shard_ids.len();
             let _total_chunks_in_shard = metadata_json.chunks.len();
             let chunk_name = chunk.clone();
             let filename_clone = filename.clone();
