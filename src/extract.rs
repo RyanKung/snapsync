@@ -48,7 +48,7 @@ pub(crate) fn extract_tar(
 
         // Check if file already exists with correct size
         let target_path = db_path.join(&entry_path);
-        let expected_size = entry.size()?;
+        let expected_size = entry.header().size()?;
 
         let should_extract = if target_path.exists() {
             match std::fs::metadata(&target_path) {
