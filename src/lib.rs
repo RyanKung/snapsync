@@ -14,13 +14,13 @@
 //! # Example
 //!
 //! ```no_run
-//! use snapsync::{download_snapshots, DownloadConfig};
+//! use snapsync::{download_snapshots, DownloadConfig, ExecutionStage};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = DownloadConfig::default();
 //! let shard_ids = vec![0, 1];
 //!
-//! download_snapshots(&config, ".rocks".to_string(), shard_ids).await?;
+//! download_snapshots(&config, ".rocks".to_string(), shard_ids, ExecutionStage::All).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -469,6 +469,19 @@ async fn download_file_simple(
     Ok(())
 }
 
+/// Stage control for the snapshot download process
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionStage {
+    /// Execute all stages
+    All,
+    /// Only download chunks
+    DownloadOnly,
+    /// Only merge chunks into tar
+    MergeOnly,
+    /// Only extract tar to directory
+    ExtractOnly,
+}
+
 /// Downloads and restores RocksDB snapshots for the specified shards.
 ///
 /// This is the main entry point for downloading snapshots. It performs the following steps:
@@ -477,7 +490,6 @@ async fn download_file_simple(
 /// 2. Downloads chunks with resumable support (skips verified files)
 /// 3. Decompresses and merges chunks into tar archives
 /// 4. Extracts tar archives to the RocksDB directory
-/// 5. Cleans up temporary files
 ///
 /// # Arguments
 ///
@@ -492,11 +504,11 @@ async fn download_file_simple(
 /// # Example
 ///
 /// ```no_run
-/// use snapsync::{download_snapshots, DownloadConfig};
+/// use snapsync::{download_snapshots, DownloadConfig, ExecutionStage};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = DownloadConfig::default();
-/// download_snapshots(&config, ".rocks".to_string(), vec![0, 1]).await?;
+/// download_snapshots(&config, ".rocks".to_string(), vec![0, 1], ExecutionStage::All).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -504,22 +516,37 @@ pub async fn download_snapshots(
     config: &DownloadConfig,
     db_dir: String,
     shard_ids: Vec<u32>,
+    stage: ExecutionStage,
 ) -> Result<(), SnapshotError> {
     let snapshot_dir = config.snapshot_download_dir.clone();
     std::fs::create_dir_all(snapshot_dir.clone())?;
 
-    // First, fetch metadata for all shards
+    // Load or fetch metadata
+    let metadata_file_path = format!("{}/metadata.json", snapshot_dir);
     let mut all_metadata = HashMap::new();
-    for &shard_id in &shard_ids {
-        let metadata = download_metadata(&config.network, shard_id, config).await?;
-        all_metadata.insert(shard_id.to_string(), metadata);
+
+    // For merge/extract only stages, try to load existing metadata first
+    if stage == ExecutionStage::MergeOnly || stage == ExecutionStage::ExtractOnly {
+        if let Ok(content) = std::fs::read_to_string(&metadata_file_path) {
+            if let Ok(metadata) = serde_json::from_str(&content) {
+                all_metadata = metadata;
+                info!("Loaded existing metadata from {}", metadata_file_path);
+            }
+        }
     }
 
-    // Persist metadata.json file
-    let metadata_file_path = format!("{}/metadata.json", snapshot_dir);
-    let metadata_json = serde_json::to_string_pretty(&all_metadata)?;
-    std::fs::write(&metadata_file_path, metadata_json)?;
-    info!("Persisted metadata to {}", metadata_file_path);
+    // Fetch metadata if not loaded or if in download stage
+    if all_metadata.is_empty() {
+        for &shard_id in &shard_ids {
+            let metadata = download_metadata(&config.network, shard_id, config).await?;
+            all_metadata.insert(shard_id.to_string(), metadata);
+        }
+
+        // Persist metadata.json file
+        let metadata_json = serde_json::to_string_pretty(&all_metadata)?;
+        std::fs::write(&metadata_file_path, metadata_json)?;
+        info!("Persisted metadata to {}", metadata_file_path);
+    }
 
     // Count total chunks for the progress bar
     let total_chunks: usize = all_metadata.values().map(|m| m.chunks.len()).sum();
@@ -541,6 +568,11 @@ pub async fn download_snapshots(
     // Create semaphore to limit concurrent downloads
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_downloads));
 
+    // Skip download stage if requested
+    let should_download = stage == ExecutionStage::All || stage == ExecutionStage::DownloadOnly;
+    let should_merge = stage == ExecutionStage::All || stage == ExecutionStage::MergeOnly;
+    let should_extract = stage == ExecutionStage::All || stage == ExecutionStage::ExtractOnly;
+
     // Process each shard sequentially
     for &shard_id in &shard_ids {
         let metadata_json = &all_metadata[&shard_id.to_string()];
@@ -548,180 +580,223 @@ pub async fn download_snapshots(
 
         std::fs::create_dir_all(format!("{}/shard-{}", snapshot_dir, shard_id))?;
 
-        // Collect download tasks for this shard
-        let mut download_tasks = vec![];
+        // Download stage
         let mut filenames_in_order = vec![];
 
-        for chunk in &metadata_json.chunks {
-            let download_path = format!("{}/{}/{}", config.snapshot_download_url, base_path, chunk);
-            let filename = format!("{}/shard-{}/{}", snapshot_dir, shard_id, chunk);
+        if should_download {
+            // Collect download tasks for this shard
+            let mut download_tasks = vec![];
 
-            // Check if file already exists and is valid (resumable download support)
-            let chunk_display_name = chunk.clone();
-            match verify_local_file(&filename, &download_path, config.skip_verify).await {
-                Ok(true) => {
-                    // File is already downloaded and verified, skip download
-                    pb.set_message(format!("| ✅ Verified: {}", chunk_display_name));
-                    pb.inc(1);
-                    filenames_in_order.push(filename);
-                    continue;
+            for chunk in &metadata_json.chunks {
+                let download_path =
+                    format!("{}/{}/{}", config.snapshot_download_url, base_path, chunk);
+                let filename = format!("{}/shard-{}/{}", snapshot_dir, shard_id, chunk);
+
+                // Check if file already exists and is valid (resumable download support)
+                let chunk_display_name = chunk.clone();
+                match verify_local_file(&filename, &download_path, config.skip_verify).await {
+                    Ok(true) => {
+                        // File is already downloaded and verified, skip download
+                        pb.set_message(format!("| ✅ Verified: {}", chunk_display_name));
+                        pb.inc(1);
+                        filenames_in_order.push(filename);
+                        continue;
+                    }
+                    Ok(false) | Err(_) => {
+                        // File needs to be downloaded
+                    }
                 }
-                Ok(false) | Err(_) => {
-                    // File needs to be downloaded
+
+                // Prepare download task
+                let semaphore = Arc::clone(&semaphore);
+                let pb_clone = pb.clone();
+                let _shard_idx = shard_ids.iter().position(|&s| s == shard_id).unwrap() + 1;
+                let _total_shards = shard_ids.len();
+                let _total_chunks_in_shard = metadata_json.chunks.len();
+                let chunk_name = chunk.clone();
+                let filename_clone = filename.clone();
+
+                filenames_in_order.push(filename.clone());
+
+                let task = tokio::spawn(async move {
+                    // Acquire semaphore permit
+                    let _permit = semaphore.acquire().await.unwrap();
+
+                    // Update progress message with current chunk info
+                    pb_clone.set_message(format!("| ⬇️  Downloading: {}", chunk_name));
+
+                    let retry_strategy =
+                        tokio_retry2::strategy::FixedInterval::from_millis(10_000).take(5);
+
+                    let result = Retry::spawn(retry_strategy, || {
+                        let download_path_clone = download_path.clone();
+                        let filename_clone = filename_clone.clone();
+                        let pb_inner = pb_clone.clone();
+
+                        async move {
+                            let result = download_file_simple(
+                                &download_path_clone,
+                                &filename_clone,
+                                pb_inner,
+                            )
+                            .await;
+                            match result {
+                                Ok(_) => Ok(()),
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to download {} due to error: {}",
+                                        filename_clone, e
+                                    );
+                                    RetryError::to_transient(e)
+                                }
+                            }
+                        }
+                    })
+                    .await;
+
+                    pb_clone.inc(1);
+                    result
+                });
+
+                download_tasks.push(task);
+            }
+
+            // Wait for all downloads in this shard to complete
+            for task in download_tasks {
+                match task.await {
+                    Ok(Ok(_)) => {
+                        // Download succeeded
+                    }
+                    Ok(Err(e)) => {
+                        error!("Download task failed: {}", e);
+                        pb.finish_with_message("❌ Download failed!");
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        error!("Task join error: {}", e);
+                        pb.finish_with_message("❌ Download failed!");
+                        return Err(SnapshotError::DownloadFailed(format!("Task failed: {}", e)));
+                    }
                 }
             }
 
-            // Prepare download task
-            let semaphore = Arc::clone(&semaphore);
-            let pb_clone = pb.clone();
-            let _shard_idx = shard_ids.iter().position(|&s| s == shard_id).unwrap() + 1;
-            let _total_shards = shard_ids.len();
-            let _total_chunks_in_shard = metadata_json.chunks.len();
-            let chunk_name = chunk.clone();
-            let filename_clone = filename.clone();
-
-            filenames_in_order.push(filename.clone());
-
-            let task = tokio::spawn(async move {
-                // Acquire semaphore permit
-                let _permit = semaphore.acquire().await.unwrap();
-
-                // Update progress message with current chunk info
-                pb_clone.set_message(format!("| ⬇️  Downloading: {}", chunk_name));
-
-                let retry_strategy =
-                    tokio_retry2::strategy::FixedInterval::from_millis(10_000).take(5);
-
-                let result = Retry::spawn(retry_strategy, || {
-                    let download_path_clone = download_path.clone();
-                    let filename_clone = filename_clone.clone();
-                    let pb_inner = pb_clone.clone();
-
-                    async move {
-                        let result =
-                            download_file_simple(&download_path_clone, &filename_clone, pb_inner)
-                                .await;
-                        match result {
-                            Ok(_) => Ok(()),
-                            Err(e) => {
-                                warn!("Failed to download {} due to error: {}", filename_clone, e);
-                                RetryError::to_transient(e)
-                            }
-                        }
-                    }
-                })
-                .await;
-
-                pb_clone.inc(1);
-                result
-            });
-
-            download_tasks.push(task);
-        }
-
-        // Wait for all downloads in this shard to complete
-        for task in download_tasks {
-            match task.await {
-                Ok(Ok(_)) => {
-                    // Download succeeded
-                }
-                Ok(Err(e)) => {
-                    error!("Download task failed: {}", e);
-                    pb.finish_with_message("❌ Download failed!");
-                    return Err(e);
-                }
-                Err(e) => {
-                    error!("Task join error: {}", e);
-                    pb.finish_with_message("❌ Download failed!");
-                    return Err(SnapshotError::DownloadFailed(format!("Task failed: {}", e)));
-                }
+            pb.finish_with_message(format!(
+                "✅ Downloaded {} chunks for shard {}",
+                filenames_in_order.len(),
+                shard_id
+            ));
+        } else {
+            // If not downloading, collect existing chunk files
+            for chunk in &metadata_json.chunks {
+                let filename = format!("{}/shard-{}/{}", snapshot_dir, shard_id, chunk);
+                filenames_in_order.push(filename);
             }
         }
 
         let local_chunks = filenames_in_order;
 
-        // Finish download progress bar and create new one for merging
-        pb.finish_with_message(format!(
-            "✅ Downloaded {} chunks for shard {}",
-            local_chunks.len(),
-            shard_id
-        ));
+        // Return early if only downloading
+        if stage == ExecutionStage::DownloadOnly {
+            continue;
+        }
 
-        // Create new progress bar for merging phase
-        let merge_pb = indicatif::ProgressBar::new(local_chunks.len() as u64);
-        merge_pb.set_style(
+        // Define tar filename for both merge and extract stages
+        let tar_filename = format!("{}/shard_{}_snapshot.tar", snapshot_dir, shard_id);
+
+        // Merge stage
+        if !should_merge {
+            // Skip to extraction
+            info!("Skipping merge stage for shard {}", shard_id);
+        } else {
+            // Create new progress bar for merging phase
+            let merge_pb = indicatif::ProgressBar::new(local_chunks.len() as u64);
+            merge_pb.set_style(
             indicatif::ProgressStyle::default_bar()
                 .template("{spinner:.cyan} [{bar:40.cyan/blue}] {pos}/{len} {msg} | {elapsed_precise} elapsed, ETA {eta_precise}")
                 .unwrap()
                 .progress_chars("█▓▒░ "),
         );
-        merge_pb.set_message(format!("🔄 Merging shard {} chunks", shard_id));
+            merge_pb.set_message(format!("🔄 Merging shard {} chunks", shard_id));
+            let mut tar_file = BufWriter::new(tokio::fs::File::create(tar_filename.clone()).await?);
 
-        let tar_filename = format!("{}/shard_{}_snapshot.tar", snapshot_dir, shard_id);
-        let mut tar_file = BufWriter::new(tokio::fs::File::create(tar_filename.clone()).await?);
+            // Use sliding window for parallel decompression with controlled memory
+            let total_files = local_chunks.len();
+            // Auto-detect CPU cores for optimal merge performance
+            let window_size = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4);
 
-        // Use sliding window for parallel decompression with controlled memory
-        let total_files = local_chunks.len();
-        // Auto-detect CPU cores for optimal merge performance
-        let window_size = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
+            let mut current_index = 0;
+            let mut pending_tasks: Vec<tokio::task::JoinHandle<Result<Vec<u8>, SnapshotError>>> =
+                Vec::new();
 
-        let mut current_index = 0;
-        let mut pending_tasks: Vec<tokio::task::JoinHandle<Result<Vec<u8>, SnapshotError>>> =
-            Vec::new();
+            while current_index < total_files || !pending_tasks.is_empty() {
+                // Spawn new tasks up to window size
+                while pending_tasks.len() < window_size && current_index < total_files {
+                    let filename = local_chunks[current_index].clone();
+                    let index = current_index;
+                    let merge_pb_clone = merge_pb.clone();
 
-        while current_index < total_files || !pending_tasks.is_empty() {
-            // Spawn new tasks up to window size
-            while pending_tasks.len() < window_size && current_index < total_files {
-                let filename = local_chunks[current_index].clone();
-                let index = current_index;
-                let merge_pb_clone = merge_pb.clone();
+                    let task = tokio::task::spawn_blocking(move || {
+                        let chunk_name = std::path::Path::new(&filename)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("");
 
-                let task = tokio::task::spawn_blocking(move || {
-                    let chunk_name = std::path::Path::new(&filename)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
+                        merge_pb_clone.set_message(format!(
+                            "| 🔄 Decompressing: {}/{} | {}",
+                            index + 1,
+                            total_files,
+                            chunk_name
+                        ));
 
-                    merge_pb_clone.set_message(format!(
-                        "| 🔄 Decompressing: {}/{} | {}",
-                        index + 1,
-                        total_files,
-                        chunk_name
-                    ));
+                        let file =
+                            std::fs::File::open(&filename).map_err(SnapshotError::IoError)?;
+                        let reader = std::io::BufReader::with_capacity(4 * 1024 * 1024, file);
+                        let mut gz_decoder = GzDecoder::new(reader);
+                        let mut buffer = Vec::new();
+                        gz_decoder
+                            .read_to_end(&mut buffer)
+                            .map_err(SnapshotError::IoError)?;
+                        Ok::<Vec<u8>, SnapshotError>(buffer)
+                    });
 
-                    let file = std::fs::File::open(&filename).map_err(SnapshotError::IoError)?;
-                    let reader = std::io::BufReader::with_capacity(4 * 1024 * 1024, file);
-                    let mut gz_decoder = GzDecoder::new(reader);
-                    let mut buffer = Vec::new();
-                    gz_decoder
-                        .read_to_end(&mut buffer)
-                        .map_err(SnapshotError::IoError)?;
-                    Ok::<Vec<u8>, SnapshotError>(buffer)
-                });
+                    pending_tasks.push(task);
+                    current_index += 1;
+                }
 
-                pending_tasks.push(task);
-                current_index += 1;
+                // Wait for first task to complete and write it
+                if !pending_tasks.is_empty() {
+                    let task = pending_tasks.remove(0);
+                    let buffer = task.await.map_err(|e| {
+                        SnapshotError::IoError(std::io::Error::other(format!(
+                            "Task join error: {}",
+                            e
+                        )))
+                    })??;
+
+                    tar_file.write_all(&buffer).await?;
+                    merge_pb.inc(1);
+                }
             }
-
-            // Wait for first task to complete and write it
-            if !pending_tasks.is_empty() {
-                let task = pending_tasks.remove(0);
-                let buffer = task.await.map_err(|e| {
-                    SnapshotError::IoError(std::io::Error::other(format!("Task join error: {}", e)))
-                })??;
-
-                tar_file.write_all(&buffer).await?;
-                merge_pb.inc(1);
-            }
+            tar_file.flush().await?;
+            merge_pb.finish_with_message(format!(
+                "✅ Merged {} chunks for shard {}",
+                local_chunks.len(),
+                shard_id
+            ));
         }
-        tar_file.flush().await?;
-        merge_pb.finish_with_message(format!(
-            "✅ Merged {} chunks for shard {}",
-            local_chunks.len(),
-            shard_id
-        ));
+
+        // Return early if only merging
+        if stage == ExecutionStage::MergeOnly {
+            continue;
+        }
+
+        // Extract stage
+        if !should_extract {
+            info!("Skipping extract stage for shard {}", shard_id);
+            continue;
+        }
 
         // Extract tar with progress tracking
         let file = std::fs::File::open(tar_filename.clone())?;

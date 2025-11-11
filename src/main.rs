@@ -3,10 +3,23 @@
 //! This binary provides a user-friendly CLI for downloading and restoring
 //! RocksDB snapshots from S3/R2 storage.
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use snapsync::{download_snapshots, DownloadConfig};
 use std::path::PathBuf;
 use tracing::info;
+
+/// Execution stage for the snapshot download process
+#[derive(Debug, Clone, ValueEnum)]
+enum Stage {
+    /// Execute all stages: download, merge, and extract
+    All,
+    /// Only download chunks from CDN
+    Download,
+    /// Only merge downloaded chunks into tar (requires downloaded chunks)
+    Merge,
+    /// Only extract tar to RocksDB directory (requires merged tar)
+    Extract,
+}
 
 /// Command-line arguments for SnapSync.
 #[derive(Parser, Debug)]
@@ -48,6 +61,10 @@ struct Args {
     /// Skip all verification, trust existing files completely (use with caution)
     #[arg(long)]
     skip_verify: bool,
+
+    /// Stage to execute (default: all)
+    #[arg(long, default_value = "all")]
+    stage: Stage,
 }
 
 #[tokio::main]
@@ -84,7 +101,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let db_dir = args.output.to_str().unwrap().to_string();
 
-    match download_snapshots(&config, db_dir, args.shards).await {
+    // Convert CLI stage to execution stage
+    let execution_stage = match args.stage {
+        Stage::All => snapsync::ExecutionStage::All,
+        Stage::Download => snapsync::ExecutionStage::DownloadOnly,
+        Stage::Merge => snapsync::ExecutionStage::MergeOnly,
+        Stage::Extract => snapsync::ExecutionStage::ExtractOnly,
+    };
+
+    match download_snapshots(&config, db_dir, args.shards, execution_stage).await {
         Ok(_) => {
             info!("✅ Snapshot download and restore completed successfully!");
             Ok(())
