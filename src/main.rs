@@ -45,7 +45,7 @@ struct Args {
     #[arg(short, long, default_value = "4")]
     workers: usize,
 
-    /// Skip MD5 verification, only check file size (faster but less safe)
+    /// Skip all verification, trust existing files completely (use with caution)
     #[arg(long)]
     skip_verify: bool,
 }

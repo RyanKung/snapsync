@@ -98,10 +98,11 @@ pub struct DownloadConfig {
     /// even low-core CPUs can handle 8-16 concurrent downloads efficiently.
     /// The limiting factor is network bandwidth, not CPU.
     pub max_concurrent_downloads: usize,
-    /// Skip MD5 verification, only check file size (default: false).
+    /// Skip all verification, trust existing files completely (default: false).
     ///
-    /// When enabled, files are only verified by size comparison, which is much
-    /// faster (~50-1000x) but less reliable. Use with caution for trusted sources.
+    /// When enabled, existing files are assumed to be valid without any checks
+    /// (no size check, no MD5 check). This is extremely fast but should only be
+    /// used when you completely trust the local files (e.g., re-running after interruption).
     pub skip_verify: bool,
 }
 
