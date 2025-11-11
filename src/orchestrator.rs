@@ -209,7 +209,7 @@ pub async fn download_snapshots(
         for (index, _entry) in archive_for_count.entries()?.enumerate() {
             total_entries = (index + 1) as u64;
             // Update every 1000 files to avoid too much overhead
-            if total_entries % 1000 == 0 {
+            if total_entries.is_multiple_of(1000) {
                 count_pb.set_position(total_entries);
             }
         }
@@ -223,7 +223,7 @@ pub async fn download_snapshots(
         );
 
         // Create and configure extract progress bar
-        let extract_pb = indicatif::ProgressBar::new(total_entries as u64);
+        let extract_pb = indicatif::ProgressBar::new(total_entries);
         extract_pb.set_style(
             indicatif::ProgressStyle::default_bar()
                 .template("{spinner:.cyan} [{bar:40.cyan/blue}] {pos}/{len} {msg} | {elapsed_precise} elapsed, ETA {eta_precise}")
