@@ -188,25 +188,39 @@ pub async fn download_snapshots(
         // Count entries first to set progress bar length
         info!("Counting files in tar archive for shard {}...", shard_id);
 
-        // Show spinner during counting (can take 5-10 minutes for large tar files)
-        let count_spinner = indicatif::ProgressBar::new_spinner();
-        count_spinner.set_style(
+        // Show progress during counting with live file count
+        let count_pb = indicatif::ProgressBar::new_spinner();
+        count_pb.set_style(
             indicatif::ProgressStyle::default_spinner()
-                .template("{spinner:.cyan} {msg}")
+                .template("{spinner:.cyan} {msg} {pos} files found | {elapsed_precise} elapsed")
                 .unwrap(),
         );
-        count_spinner.set_message(format!(
-            "🔍 Counting files in tar archive for shard {} (this may take several minutes)...",
+        count_pb.set_message(format!(
+            "🔍 Counting files in tar archive for shard {}...",
             shard_id
         ));
-        count_spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+        count_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
         let file_for_count = std::fs::File::open(&tar_filename)?;
         let mut archive_for_count = tar::Archive::new(file_for_count);
-        let total_entries = archive_for_count.entries()?.count();
 
-        count_spinner.finish_and_clear();
-        info!("✅ Found {} files in tar archive", total_entries);
+        // Count entries with progress feedback
+        let mut total_entries = 0u64;
+        for (index, _entry) in archive_for_count.entries()?.enumerate() {
+            total_entries = (index + 1) as u64;
+            // Update every 1000 files to avoid too much overhead
+            if total_entries % 1000 == 0 {
+                count_pb.set_position(total_entries);
+            }
+        }
+        count_pb.set_position(total_entries);
+
+        count_pb.finish_and_clear();
+        info!(
+            "✅ Found {} files in tar archive (took {})",
+            total_entries,
+            humantime::format_duration(count_pb.elapsed())
+        );
 
         // Create and configure extract progress bar
         let extract_pb = indicatif::ProgressBar::new(total_entries as u64);
