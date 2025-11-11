@@ -98,6 +98,8 @@ snapsync --network FARCASTER_NETWORK_TESTNET --shards 0 --output ./testnet-data 
 
 ```bash
 # Default is 4 workers, increase for faster downloads
+# Note: Worker count is not limited by CPU cores (async I/O)
+# Even 2-core CPUs can efficiently handle 8-16 workers
 snapsync --shards 0,1,2 --workers 8 --output .rocks
 ```
 

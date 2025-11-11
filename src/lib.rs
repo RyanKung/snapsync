@@ -92,7 +92,11 @@ pub struct DownloadConfig {
     pub snapshot_download_dir: String,
     /// Network name (e.g., `"FARCASTER_NETWORK_MAINNET"`, `"FARCASTER_NETWORK_TESTNET"`)
     pub network: String,
-    /// Maximum number of concurrent downloads (default: 4)
+    /// Maximum number of concurrent downloads (default: 4).
+    ///
+    /// Note: This is not limited by CPU cores. Since downloads are I/O-bound,
+    /// even low-core CPUs can handle 8-16 concurrent downloads efficiently.
+    /// The limiting factor is network bandwidth, not CPU.
     pub max_concurrent_downloads: usize,
 }
 
