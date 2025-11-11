@@ -60,19 +60,16 @@ pub(crate) fn extract_tar(
                     if actual_size == expected_size {
                         // File exists with correct size, skip it
                         skipped_count += 1;
-                        if index < 10 || skipped_count <= 5 {
-                            info!(
-                                "⏭️  Skipping existing file: {} ({} bytes)",
-                                file_name, actual_size
-                            );
-                        }
                         false
                     } else {
                         // File exists but wrong size, re-extract
-                        info!(
-                            "⚠️  Re-extracting {} (size mismatch: {} vs {} bytes)",
-                            file_name, actual_size, expected_size
-                        );
+                        // Only log the first few mismatches to avoid spam
+                        if extracted_count < 3 {
+                            info!(
+                                "⚠️  Re-extracting {} (size mismatch: {} vs {} bytes)",
+                                file_name, actual_size, expected_size
+                            );
+                        }
                         true
                     }
                 }
@@ -103,17 +100,18 @@ pub(crate) fn extract_tar(
         }
     }
 
-    if skipped_count > 0 {
-        info!(
-            "✅ Extraction complete: {} total files ({} extracted, {} skipped)",
-            file_count, extracted_count, skipped_count
-        );
-    }
-
     extract_pb.finish_with_message(format!(
         "✅ Extracted {} files to {} ({} new, {} skipped)",
         file_count, db_dir, extracted_count, skipped_count
     ));
+
+    // Log final summary
+    if skipped_count > 0 {
+        info!(
+            "Extraction summary: {} total files ({} extracted, {} skipped)",
+            file_count, extracted_count, skipped_count
+        );
+    }
 
     Ok(())
 }
