@@ -764,6 +764,5 @@ pub async fn download_snapshots(
     }
 
     pb.finish_with_message("✅ All snapshots downloaded and extracted successfully!");
-    std::fs::remove_dir_all(snapshot_dir)?;
     Ok(())
 }
