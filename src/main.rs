@@ -45,10 +45,6 @@ struct Args {
     #[arg(short, long, default_value = "4")]
     workers: usize,
 
-    /// Number of concurrent workers for merging phase (default: 4)
-    #[arg(long, default_value = "4")]
-    merge_workers: usize,
-
     /// Skip all verification, trust existing files completely (use with caution)
     #[arg(long)]
     skip_verify: bool,
@@ -84,7 +80,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         network: args.network,
         max_concurrent_downloads: args.workers,
         skip_verify: args.skip_verify,
-        merge_workers: args.merge_workers,
     };
 
     let db_dir = args.output.to_str().unwrap().to_string();
