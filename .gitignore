@@ -1,4 +1,6 @@
 /target
+.rocks.snapshot/
+.rocks/
 
 # Ignore all markdown files except README.md
 *.md

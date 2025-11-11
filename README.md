@@ -14,8 +14,9 @@
 
 ✅ **Resumable Downloads** - Interrupted downloads can be resumed from where they left off  
 ✅ **MD5 Verification** - Automatic integrity checking using ETag/MD5 checksums  
-✅ **Parallel Shard Support** - Download multiple shards efficiently  
-✅ **Progress Tracking** - Real-time progress bars and ETA estimates  
+✅ **Parallel Downloads** - Concurrent downloads with configurable worker count (default: 4)  
+✅ **Multi-Shard Support** - Download multiple shards efficiently  
+✅ **Dynamic Progress Bar** - Unified, animated progress display with real-time stats  
 ✅ **Automatic Retry** - Built-in retry logic for transient failures  
 ✅ **Smart Caching** - Skip already-downloaded and verified chunks
 
@@ -65,6 +66,10 @@ Options:
   -v, --verbose
           Verbose logging
 
+  -w, --workers <WORKERS>
+          Number of concurrent downloads
+          [default: 4]
+
   -h, --help
           Print help
 
@@ -87,6 +92,13 @@ snapsync --shards 0,1 --output ./data/.rocks
 
 ```bash
 snapsync --network FARCASTER_NETWORK_TESTNET --shards 0 --output ./testnet-data --verbose
+```
+
+#### Parallel downloads with 8 workers
+
+```bash
+# Default is 4 workers, increase for faster downloads
+snapsync --shards 0,1,2 --workers 8 --output .rocks
 ```
 
 #### Resume interrupted download

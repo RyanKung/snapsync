@@ -30,10 +30,12 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, BufReader, Read};
+use std::sync::Arc;
 use tar::Archive;
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::sync::Semaphore;
 use tokio_retry2::{Retry, RetryError};
 use tracing::{error, info, warn};
 
@@ -76,9 +78,10 @@ struct SnapshotMetadata {
 /// use snapsync::DownloadConfig;
 ///
 /// let config = DownloadConfig {
-///     snapshot_download_url: "https://example.com".to_string(), // Use angle brackets in docs: <https://...>
+///     snapshot_download_url: "https://example.com".to_string(),
 ///     snapshot_download_dir: ".temp".to_string(),
 ///     network: "FARCASTER_NETWORK_MAINNET".to_string(),
+///     max_concurrent_downloads: 8, // Use 8 parallel workers
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -89,6 +92,8 @@ pub struct DownloadConfig {
     pub snapshot_download_dir: String,
     /// Network name (e.g., `"FARCASTER_NETWORK_MAINNET"`, `"FARCASTER_NETWORK_TESTNET"`)
     pub network: String,
+    /// Maximum number of concurrent downloads (default: 4)
+    pub max_concurrent_downloads: usize,
 }
 
 impl Default for DownloadConfig {
@@ -98,6 +103,7 @@ impl Default for DownloadConfig {
                 .to_string(),
             snapshot_download_dir: ".rocks.snapshot".to_string(),
             network: "FARCASTER_NETWORK_MAINNET".to_string(),
+            max_concurrent_downloads: 4,
         }
     }
 }
@@ -456,10 +462,7 @@ pub async fn download_snapshots(
     info!("Persisted metadata to {}", metadata_file_path);
 
     // Count total chunks for the progress bar
-    let total_chunks: usize = all_metadata
-        .values()
-        .map(|m| m.chunks.len())
-        .sum();
+    let total_chunks: usize = all_metadata.values().map(|m| m.chunks.len()).sum();
 
     // Create a clean, unified progress bar
     let pb = indicatif::ProgressBar::new(total_chunks as u64);
@@ -481,6 +484,9 @@ pub async fn download_snapshots(
         shard_ids.len()
     ));
 
+    // Create semaphore to limit concurrent downloads
+    let semaphore = Arc::new(Semaphore::new(config.max_concurrent_downloads));
+
     // Process each shard sequentially
     for &shard_id in &shard_ids {
         let metadata_json = &all_metadata[&shard_id.to_string()];
@@ -488,65 +494,102 @@ pub async fn download_snapshots(
 
         std::fs::create_dir_all(format!("{}/shard-{}", snapshot_dir, shard_id))?;
 
-        let mut local_chunks = vec![];
-        // Process each chunk sequentially within the shard
+        // Collect download tasks for this shard
+        let mut download_tasks = vec![];
+        let mut filenames_in_order = vec![];
+
         for (chunk_index, chunk) in metadata_json.chunks.iter().enumerate() {
             let download_path = format!("{}/{}/{}", config.snapshot_download_url, base_path, chunk);
             let filename = format!("{}/shard-{}/{}", snapshot_dir, shard_id, chunk);
-
-            // Update progress bar message
-            pb.set_message(format!(
-                "📦 Shard {}/{} | Chunk {}/{} | {}",
-                shard_ids.iter().position(|&s| s == shard_id).unwrap() + 1,
-                shard_ids.len(),
-                chunk_index + 1,
-                metadata_json.chunks.len(),
-                chunk
-            ));
 
             // Check if file already exists and is valid (resumable download support)
             match verify_local_file(&filename, &download_path).await {
                 Ok(true) => {
                     // File is already downloaded and verified, skip download
                     pb.inc(1);
-                    local_chunks.push(filename);
+                    filenames_in_order.push(filename);
                     continue;
                 }
                 Ok(false) | Err(_) => {
-                    // File needs to be downloaded or re-downloaded
+                    // File needs to be downloaded
                 }
             }
 
-            let retry_strategy = tokio_retry2::strategy::FixedInterval::from_millis(10_000).take(5);
+            // Prepare download task
+            let semaphore = Arc::clone(&semaphore);
+            let pb_clone = pb.clone();
+            let shard_idx = shard_ids.iter().position(|&s| s == shard_id).unwrap() + 1;
+            let total_shards = shard_ids.len();
+            let total_chunks_in_shard = metadata_json.chunks.len();
+            let chunk_name = chunk.clone();
+            let filename_clone = filename.clone();
 
-            let result = Retry::spawn(retry_strategy, || {
-                let download_path_clone = download_path.clone();
-                let filename_clone = filename.clone();
-                let pb_clone = pb.clone();
+            filenames_in_order.push(filename.clone());
 
-                async move {
-                    let result =
-                        download_file_simple(&download_path_clone, &filename_clone, pb_clone).await;
-                    match result {
-                        Ok(_) => Ok(()),
-                        Err(e) => {
-                            warn!("Failed to download {} due to error: {}", filename_clone, e);
-                            RetryError::to_transient(e)
+            let task = tokio::spawn(async move {
+                // Acquire semaphore permit
+                let _permit = semaphore.acquire().await.unwrap();
+
+                // Update progress message
+                pb_clone.set_message(format!(
+                    "📦 Shard {}/{} | Chunk {}/{} | {}",
+                    shard_idx,
+                    total_shards,
+                    chunk_index + 1,
+                    total_chunks_in_shard,
+                    chunk_name
+                ));
+
+                let retry_strategy =
+                    tokio_retry2::strategy::FixedInterval::from_millis(10_000).take(5);
+
+                let result = Retry::spawn(retry_strategy, || {
+                    let download_path_clone = download_path.clone();
+                    let filename_clone = filename_clone.clone();
+                    let pb_inner = pb_clone.clone();
+
+                    async move {
+                        let result =
+                            download_file_simple(&download_path_clone, &filename_clone, pb_inner)
+                                .await;
+                        match result {
+                            Ok(_) => Ok(()),
+                            Err(e) => {
+                                warn!("Failed to download {} due to error: {}", filename_clone, e);
+                                RetryError::to_transient(e)
+                            }
                         }
                     }
-                }
-            })
-            .await;
+                })
+                .await;
 
-            if let Err(e) = result {
-                error!("Failed to download snapshot chunk {}: {}", filename, e);
-                pb.finish_with_message("❌ Download failed!");
-                return Err(e);
-            }
+                pb_clone.inc(1);
+                result
+            });
 
-            pb.inc(1);
-            local_chunks.push(filename);
+            download_tasks.push(task);
         }
+
+        // Wait for all downloads in this shard to complete
+        for task in download_tasks {
+            match task.await {
+                Ok(Ok(_)) => {
+                    // Download succeeded
+                }
+                Ok(Err(e)) => {
+                    error!("Download task failed: {}", e);
+                    pb.finish_with_message("❌ Download failed!");
+                    return Err(e);
+                }
+                Err(e) => {
+                    error!("Task join error: {}", e);
+                    pb.finish_with_message("❌ Download failed!");
+                    return Err(SnapshotError::DownloadFailed(format!("Task failed: {}", e)));
+                }
+            }
+        }
+
+        let local_chunks = filenames_in_order;
 
         pb.set_message(format!(
             "🔄 Processing shard {} - merging chunks...",

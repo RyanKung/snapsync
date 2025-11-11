@@ -40,6 +40,10 @@ struct Args {
     /// Verbose logging
     #[arg(short, long)]
     verbose: bool,
+
+    /// Number of concurrent downloads (default: 4)
+    #[arg(short, long, default_value = "4")]
+    workers: usize,
 }
 
 #[tokio::main]
@@ -70,6 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         snapshot_download_url: args.snapshot_url,
         snapshot_download_dir: args.temp_dir,
         network: args.network,
+        max_concurrent_downloads: args.workers,
     };
 
     let db_dir = args.output.to_str().unwrap().to_string();
