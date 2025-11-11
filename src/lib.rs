@@ -82,6 +82,7 @@ struct SnapshotMetadata {
 ///     network: "FARCASTER_NETWORK_MAINNET".to_string(),
 ///     max_concurrent_downloads: 8,
 ///     skip_verify: false,
+///     merge_workers: 4,
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -104,6 +105,14 @@ pub struct DownloadConfig {
     /// (no size check, no MD5 check). This is extremely fast but should only be
     /// used when you completely trust the local files (e.g., re-running after interruption).
     pub skip_verify: bool,
+    /// Number of concurrent workers for merging/decompressing files (default: 4).
+    ///
+    /// Controls memory usage during the merge phase. Higher values are faster but
+    /// use more memory (each worker buffers one decompressed file in memory).
+    /// - 2 workers: ~100-200MB memory
+    /// - 4 workers: ~200-400MB memory
+    /// - 8 workers: ~400-800MB memory
+    pub merge_workers: usize,
 }
 
 impl Default for DownloadConfig {
@@ -115,6 +124,7 @@ impl Default for DownloadConfig {
             network: "FARCASTER_NETWORK_MAINNET".to_string(),
             max_concurrent_downloads: 4,
             skip_verify: false,
+            merge_workers: 4,
         }
     }
 }
@@ -662,7 +672,7 @@ pub async fn download_snapshots(
 
         // Use sliding window for parallel decompression with controlled memory
         let total_files = local_chunks.len();
-        let window_size = 8; // Process 8 files concurrently (max ~400-800MB memory)
+        let window_size = config.merge_workers; // Use configured merge workers
 
         let mut current_index = 0;
         let mut pending_tasks: Vec<tokio::task::JoinHandle<Result<Vec<u8>, SnapshotError>>> =
