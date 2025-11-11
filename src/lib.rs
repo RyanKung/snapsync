@@ -29,12 +29,11 @@ use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{self, BufReader, Read};
+use std::io::{self, Read};
 use std::sync::Arc;
 use tar::Archive;
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
-use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Semaphore;
 use tokio_retry2::{Retry, RetryError};
 use tracing::{error, info, warn};
@@ -198,12 +197,13 @@ async fn download_metadata(
 ///
 /// The MD5 hash as a hexadecimal string, or an error.
 async fn compute_file_md5(filename: &str) -> Result<String, SnapshotError> {
-    let mut file = tokio::fs::File::open(filename).await?;
+    let file = tokio::fs::File::open(filename).await?;
+    let mut reader = BufReader::with_capacity(1024 * 1024, file); // 1MB buffer
     let mut hasher = md5::Context::new();
-    let mut buffer = vec![0u8; 8192]; // 8KB buffer for streaming
+    let mut buffer = vec![0u8; 1024 * 1024]; // 1MB chunks for faster reading
 
     loop {
-        let n = file.read(&mut buffer).await?;
+        let n = reader.read(&mut buffer).await?;
         if n == 0 {
             break;
         }
@@ -232,6 +232,13 @@ async fn compute_file_md5(filename: &str) -> Result<String, SnapshotError> {
 /// `Ok(false)` if the file needs to be downloaded,
 /// `Err` on verification errors.
 async fn verify_local_file(filename: &str, remote_url: &str) -> Result<bool, SnapshotError> {
+    let file_display_name = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(filename);
+
+    info!("🔍 Verifying existing file: {}", file_display_name);
+
     // Check if local file exists
     let local_metadata = match tokio::fs::metadata(filename).await {
         Ok(m) => m,
@@ -286,26 +293,31 @@ async fn verify_local_file(filename: &str, remote_url: &str) -> Result<bool, Sna
 
     // Verify MD5 if ETag is available
     if let Some(etag_val) = etag {
+        // Skip multipart uploads (they have "-" in ETag)
+        if etag_val.contains('-') {
+            info!(
+                "✅ File {} verified (size match, multipart upload)",
+                file_display_name
+            );
+            return Ok(true);
+        }
+
         // Compute local file MD5
         match compute_file_md5(filename).await {
             Ok(local_md5) => {
                 if local_md5 == etag_val {
-                    info!(
-                        "✓ File {} already verified (MD5: {})",
-                        filename.split('/').next_back().unwrap_or(filename),
-                        local_md5
-                    );
+                    info!("✅ File {} verified (MD5 match)", file_display_name);
                     return Ok(true);
                 } else {
                     info!(
-                        "MD5 mismatch for {}: local={}, remote={}",
-                        filename, local_md5, etag_val
+                        "❌ MD5 mismatch for {}: local={}, remote={}",
+                        file_display_name, local_md5, etag_val
                     );
                     return Ok(false);
                 }
             }
             Err(e) => {
-                warn!("Failed to compute MD5 for {}: {}", filename, e);
+                warn!("⚠️  Failed to compute MD5 for {}: {}", file_display_name, e);
                 return Ok(false);
             }
         }
@@ -313,8 +325,8 @@ async fn verify_local_file(filename: &str, remote_url: &str) -> Result<bool, Sna
 
     // No ETag available, but size matches - assume valid
     info!(
-        "File {} size matches ({} bytes), assuming valid (no ETag available)",
-        filename.split('/').next_back().unwrap_or(filename),
+        "✅ File {} verified (size match, {} bytes, no ETag)",
+        file_display_name,
         local_metadata.len()
     );
     Ok(true)
@@ -338,6 +350,13 @@ async fn download_file_simple(
     filename: &str,
     _pb: indicatif::ProgressBar,
 ) -> Result<(), SnapshotError> {
+    let file_display_name = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(filename);
+
+    info!("📥 Downloading {}", file_display_name);
+
     // Create parent directory if needed
     if let Some(parent) = std::path::Path::new(filename).parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -395,18 +414,23 @@ async fn download_file_simple(
 
     // Verify MD5 checksum (Snapchain's ETag is always MD5 for simple uploads)
     if let (Some(expected_etag), Some(hasher)) = (etag, hasher) {
-        let computed_md5 = format!("{:x}", hasher.compute());
+        // Skip multipart uploads (they have "-" in ETag)
+        if !expected_etag.contains('-') {
+            info!("🔍 Verifying MD5 for {}", file_display_name);
+            let computed_md5 = format!("{:x}", hasher.compute());
 
-        if computed_md5 != expected_etag {
-            // MD5 mismatch - delete corrupted file
-            let _ = tokio::fs::remove_file(filename).await;
-            return Err(SnapshotError::IoError(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "MD5 checksum mismatch for {}: expected {}, got {}",
-                    filename, expected_etag, computed_md5
-                ),
-            )));
+            if computed_md5 != expected_etag {
+                // MD5 mismatch - delete corrupted file
+                let _ = tokio::fs::remove_file(filename).await;
+                return Err(SnapshotError::IoError(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "❌ MD5 mismatch for {}: expected {}, got {}",
+                        file_display_name, expected_etag, computed_md5
+                    ),
+                )));
+            }
+            info!("✅ MD5 verified for {}", file_display_name);
         }
     }
 
@@ -592,7 +616,7 @@ pub async fn download_snapshots(
 
         for filename in local_chunks {
             let file = std::fs::File::open(filename)?;
-            let reader = BufReader::new(file);
+            let reader = std::io::BufReader::new(file);
             let mut gz_decoder = GzDecoder::new(reader);
             let mut buffer = Vec::new();
             // These files are small, 100MB max each
