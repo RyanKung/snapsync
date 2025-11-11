@@ -185,55 +185,33 @@ pub async fn download_snapshots(
             continue;
         }
 
-        // Count entries first to set progress bar length
-        info!("Counting files in tar archive for shard {}...", shard_id);
+        // Estimate file count based on tar size to skip expensive counting
+        let tar_metadata = std::fs::metadata(&tar_filename)?;
+        let tar_size_bytes = tar_metadata.len();
+        let tar_size_gb = tar_size_bytes as f64 / 1_073_741_824.0;
 
-        // Show progress during counting with live file count
-        let count_pb = indicatif::ProgressBar::new_spinner();
-        count_pb.set_style(
+        // RocksDB SST files are typically 10-50 MB, averaging ~25 MB
+        // Use 10.5 MB based on user's actual file sizes
+        const AVERAGE_FILE_SIZE_MB: f64 = 10.5;
+        let estimated_files = (tar_size_bytes as f64 / (AVERAGE_FILE_SIZE_MB * 1_048_576.0)) as u64;
+
+        info!(
+            "📊 Tar file size: {:.2} GB, estimated ~{} files (skipping slow counting phase)",
+            tar_size_gb, estimated_files
+        );
+
+        // Create progress bar with estimated count (will show actual count as we extract)
+        let extract_pb = indicatif::ProgressBar::new_spinner();
+        extract_pb.set_style(
             indicatif::ProgressStyle::default_spinner()
-                .template("{spinner:.cyan} {msg} {pos} files found | {elapsed_precise} elapsed")
+                .template("{spinner:.cyan} {msg} {pos} files | {elapsed_precise} elapsed")
                 .unwrap(),
         );
-        count_pb.set_message(format!(
-            "🔍 Counting files in tar archive for shard {}...",
-            shard_id
-        ));
-        count_pb.enable_steady_tick(std::time::Duration::from_millis(100));
-
-        let file_for_count = std::fs::File::open(&tar_filename)?;
-        let mut archive_for_count = tar::Archive::new(file_for_count);
-
-        // Count entries with progress feedback
-        let mut total_entries = 0u64;
-        for (index, _entry) in archive_for_count.entries()?.enumerate() {
-            total_entries = (index + 1) as u64;
-            // Update every 1000 files to avoid too much overhead
-            if total_entries.is_multiple_of(1000) {
-                count_pb.set_position(total_entries);
-            }
-        }
-        count_pb.set_position(total_entries);
-
-        count_pb.finish_and_clear();
-        info!(
-            "✅ Found {} files in tar archive (took {})",
-            total_entries,
-            humantime::format_duration(count_pb.elapsed())
-        );
-
-        // Create and configure extract progress bar
-        let extract_pb = indicatif::ProgressBar::new(total_entries);
-        extract_pb.set_style(
-            indicatif::ProgressStyle::default_bar()
-                .template("{spinner:.cyan} [{bar:40.cyan/blue}] {pos}/{len} {msg} | {elapsed_precise} elapsed, ETA {eta_precise}")
-                .unwrap()
-                .progress_chars("█▓▒░ "),
-        );
         extract_pb.set_message(format!(
-            "📂 Extracting shard {} ({} files)",
-            shard_id, total_entries
+            "📂 Extracting shard {} (~{} files estimated)...",
+            shard_id, estimated_files
         ));
+        extract_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
         extract_tar(&tar_filename, &db_dir, &extract_pb, shard_id)?;
     }

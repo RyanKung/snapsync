@@ -25,7 +25,7 @@ pub(crate) fn extract_tar(
     let mut archive = Archive::new(file);
     std::fs::create_dir_all(db_dir)?;
 
-    let total_entries = extract_pb.length().unwrap_or(0);
+    let mut file_count = 0u64;
 
     // Extract entries with progress
     for (index, entry) in archive.entries()?.enumerate() {
@@ -39,13 +39,11 @@ pub(crate) fn extract_tar(
         }
 
         entry.unpack_in(db_dir)?;
-        extract_pb.inc(1);
+        file_count = (index + 1) as u64;
+        extract_pb.set_position(file_count);
     }
 
-    extract_pb.finish_with_message(format!(
-        "✅ Extracted {} files to {}",
-        total_entries, db_dir
-    ));
+    extract_pb.finish_with_message(format!("✅ Extracted {} files to {}", file_count, db_dir));
 
     Ok(())
 }
