@@ -468,22 +468,16 @@ pub async fn download_snapshots(
     // Count total chunks for the progress bar
     let total_chunks: usize = all_metadata.values().map(|m| m.chunks.len()).sum();
 
-    // Create a clean, unified progress bar
+    // Create a clean, single-line progress bar (more stable across terminals)
     let pb = indicatif::ProgressBar::new(total_chunks as u64);
     pb.set_style(
         indicatif::ProgressStyle::default_bar()
-            .template(
-                "\n{spinner:.cyan.bold} {msg}\n\
-                 ┌─ Progress: [{bar:50.cyan/blue}] {pos}/{len} chunks\n\
-                 ├─ Speed: {bytes_per_sec}\n\
-                 ├─ Elapsed: {elapsed_precise}\n\
-                 └─ ETA: {eta_precise}\n",
-            )
+            .template("{spinner:.cyan} [{bar:40.cyan/blue}] {pos}/{len} {msg} | {elapsed_precise} elapsed, ETA {eta_precise}")
             .unwrap()
             .progress_chars("█▓▒░ "),
     );
     pb.set_message(format!(
-        "Downloading {} chunks across {} shards",
+        "📦 Downloading {} chunks from {} shard(s)",
         total_chunks,
         shard_ids.len()
     ));
@@ -534,14 +528,10 @@ pub async fn download_snapshots(
                 // Acquire semaphore permit
                 let _permit = semaphore.acquire().await.unwrap();
 
-                // Update progress message
+                // Update progress message with current chunk info
                 pb_clone.set_message(format!(
-                    "📦 Shard {}/{} | Chunk {}/{} | {}",
-                    shard_idx,
-                    total_shards,
-                    chunk_index + 1,
-                    total_chunks_in_shard,
-                    chunk_name
+                    "| Shard {}/{} | {}",
+                    shard_idx, total_shards, chunk_name
                 ));
 
                 let retry_strategy =
@@ -595,10 +585,7 @@ pub async fn download_snapshots(
 
         let local_chunks = filenames_in_order;
 
-        pb.set_message(format!(
-            "🔄 Processing shard {} - merging chunks...",
-            shard_id
-        ));
+        pb.set_message(format!("| 🔄 Merging shard {} chunks", shard_id));
 
         let tar_filename = format!("{}/shard_{}_snapshot.tar", snapshot_dir, shard_id);
         let mut tar_file = BufWriter::new(tokio::fs::File::create(tar_filename.clone()).await?);
@@ -614,10 +601,7 @@ pub async fn download_snapshots(
         }
         tar_file.flush().await?;
 
-        pb.set_message(format!(
-            "📂 Extracting shard {} to RocksDB directory...",
-            shard_id
-        ));
+        pb.set_message(format!("| 📂 Extracting shard {} to disk", shard_id));
 
         let file = std::fs::File::open(tar_filename.clone())?;
         let mut archive = Archive::new(file);
