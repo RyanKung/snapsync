@@ -72,6 +72,13 @@ pub(crate) fn extract_tar(
                                 Ok(true) => {
                                     // Magic number valid, file is complete
                                     skipped_count += 1;
+                                    // Log first few verified files to show verification is working
+                                    if skipped_count <= 3 {
+                                        info!(
+                                            "✅ Verified {} (size: {} bytes, magic number: valid)",
+                                            file_name, actual_size
+                                        );
+                                    }
                                     false
                                 }
                                 Ok(false) => {
@@ -98,6 +105,10 @@ pub(crate) fn extract_tar(
                         } else {
                             // Non-SST file, only check size
                             skipped_count += 1;
+                            // Log first few verified non-SST files
+                            if skipped_count <= 3 {
+                                info!("✅ Verified {} (size: {} bytes)", file_name, actual_size);
+                            }
                             false
                         }
                     } else {
