@@ -1,8 +1,9 @@
 //! Tar archive extraction logic.
 
 use crate::error::SnapshotError;
+use crate::sst_verify::verify_sst_magic_number;
 use tar::Archive;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Extracts a tar archive to a target directory with progress tracking.
 ///
@@ -58,9 +59,40 @@ pub(crate) fn extract_tar(
                 Ok(metadata) => {
                     let actual_size = metadata.len();
                     if actual_size == expected_size {
-                        // File exists with correct size, skip it
-                        skipped_count += 1;
-                        false
+                        // File size matches, check magic number for .sst files
+                        if file_name.ends_with(".sst") {
+                            match verify_sst_magic_number(target_path.to_str().unwrap()).await {
+                                Ok(true) => {
+                                    // Magic number valid, file is complete
+                                    skipped_count += 1;
+                                    false
+                                }
+                                Ok(false) => {
+                                    // Magic number invalid, re-extract
+                                    if extracted_count < 3 {
+                                        warn!(
+                                            "⚠️  Re-extracting {} (invalid magic number - corrupt SST file)",
+                                            file_name
+                                        );
+                                    }
+                                    true
+                                }
+                                Err(_) => {
+                                    // Can't verify magic number, re-extract to be safe
+                                    if extracted_count < 3 {
+                                        warn!(
+                                            "⚠️  Re-extracting {} (unable to verify magic number)",
+                                            file_name
+                                        );
+                                    }
+                                    true
+                                }
+                            }
+                        } else {
+                            // Non-SST file, only check size
+                            skipped_count += 1;
+                            false
+                        }
                     } else {
                         // File exists but wrong size, re-extract
                         // Only log the first few mismatches to avoid spam

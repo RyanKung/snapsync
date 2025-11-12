@@ -32,6 +32,7 @@ mod extract;
 mod merge;
 mod metadata;
 mod orchestrator;
+mod sst_verify;
 mod types;
 mod verify;
 
