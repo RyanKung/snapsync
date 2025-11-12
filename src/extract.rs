@@ -72,33 +72,26 @@ pub(crate) fn extract_tar(
                                 Ok(true) => {
                                     // Magic number valid, file is complete
                                     skipped_count += 1;
-                                    // Log first few verified files to show verification is working
-                                    if skipped_count <= 3 {
-                                        info!(
-                                            "✅ Verified {} (size: {} bytes, magic number: valid)",
-                                            file_name, actual_size
-                                        );
-                                    }
+                                    info!(
+                                        "✅ Verified {} (size: {} bytes, magic number: valid)",
+                                        file_name, actual_size
+                                    );
                                     false
                                 }
                                 Ok(false) => {
                                     // Magic number invalid, re-extract
-                                    if extracted_count < 3 {
-                                        warn!(
-                                            "⚠️  Re-extracting {} (invalid magic number - corrupt SST file)",
-                                            file_name
-                                        );
-                                    }
+                                    warn!(
+                                        "⚠️  Re-extracting {} (invalid magic number - corrupt SST file)",
+                                        file_name
+                                    );
                                     true
                                 }
                                 Err(_) => {
                                     // Can't verify magic number, re-extract to be safe
-                                    if extracted_count < 3 {
-                                        warn!(
-                                            "⚠️  Re-extracting {} (unable to verify magic number)",
-                                            file_name
-                                        );
-                                    }
+                                    warn!(
+                                        "⚠️  Re-extracting {} (unable to verify magic number)",
+                                        file_name
+                                    );
                                     true
                                 }
                             }
