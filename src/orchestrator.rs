@@ -55,29 +55,51 @@ pub async fn download_snapshots(
 
     // Load or fetch metadata
     let metadata_file_path = format!("{}/metadata.json", snapshot_dir);
-    let mut all_metadata = HashMap::new();
 
-    // For merge/extract only stages, try to load existing metadata first
-    if stage == ExecutionStage::MergeOnly || stage == ExecutionStage::ExtractOnly {
+    // Always try to load existing metadata first (to preserve other shards)
+    let mut all_metadata: HashMap<String, SnapshotMetadata> =
         if let Ok(content) = std::fs::read_to_string(&metadata_file_path) {
-            if let Ok(metadata) = serde_json::from_str(&content) {
-                all_metadata = metadata;
-                info!("Loaded existing metadata from {}", metadata_file_path);
+            match serde_json::from_str(&content) {
+                Ok(metadata) => {
+                    info!("Loaded existing metadata from {}", metadata_file_path);
+                    metadata
+                }
+                Err(_) => HashMap::new(),
             }
-        }
-    }
+        } else {
+            HashMap::new()
+        };
 
-    // Fetch metadata if not loaded or if in download stage
-    if all_metadata.is_empty() {
+    // Fetch or update metadata for requested shards
+    let should_fetch_metadata =
+        stage == ExecutionStage::All || stage == ExecutionStage::DownloadOnly;
+
+    if should_fetch_metadata {
+        // Download metadata for requested shards (merge with existing)
         for &shard_id in &shard_ids {
             let metadata = download_metadata(&config.network, shard_id, config).await?;
             all_metadata.insert(shard_id.to_string(), metadata);
         }
 
-        // Persist metadata.json file
+        // Persist merged metadata.json file
         let metadata_json = serde_json::to_string_pretty(&all_metadata)?;
         std::fs::write(&metadata_file_path, metadata_json)?;
-        info!("Persisted metadata to {}", metadata_file_path);
+        info!(
+            "Persisted metadata to {} (preserving existing shards)",
+            metadata_file_path
+        );
+    } else {
+        // For merge/extract only stages, verify requested shards exist
+        for &shard_id in &shard_ids {
+            if !all_metadata.contains_key(&shard_id.to_string()) {
+                return Err(SnapshotError::DownloadFailed(format!(
+                    "Metadata not found for shard {}. Available shards: {:?}. \
+                     Run without --stage flag to download metadata first.",
+                    shard_id,
+                    all_metadata.keys().collect::<Vec<_>>()
+                )));
+            }
+        }
     }
 
     // Determine which stages to execute
