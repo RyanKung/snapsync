@@ -3,39 +3,98 @@
   
   # SnapSync 🚀
   
-  **A fast, reliable tool for downloading and restoring RocksDB snapshots from S3/R2 storage.**
+  **Production-ready RocksDB snapshot downloader with resumable downloads and verification.**
   
   [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
   [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
   
 </div>
 
+---
+
+## 🎯 Why SnapSync?
+
+[Snapchain](https://github.com/farcasterxyz/snapchain) provides snapshot download functionality, but **lacks critical production features**:
+
+| Feature | Snapchain | SnapSync |
+|---------|-----------|----------|
+| Resumable Downloads | ❌ No | ✅ Yes |
+| File Verification (MD5) | ❌ No | ✅ Yes |
+| Resumable Extraction | ❌ No | ✅ Yes |
+| Corruption Detection | ❌ No | ✅ Yes |
+| Stage Control | ❌ No | ✅ Yes |
+| Parallel Downloads | ❌ No | ✅ Yes |
+
+**The 80-Day Problem:**
+
+When Snapchain's snapshot download or extraction **fails**:
+1. ❌ Snapshot is incomplete or corrupted
+2. ❌ Snapchain falls back to **full blockchain sync**
+3. ❌ Current sync speed: **~80 days** to catch up
+4. ❌ Your node is offline for nearly **3 months**
+
+**SnapSync Solution:**
+
+With SnapSync's resumable downloads and extraction:
+1. ✅ Download interrupted? **Resume in < 1 minute**
+2. ✅ Extraction interrupted? **Resume from last file**
+3. ✅ Corruption detected? **Re-download only bad chunks**
+4. ✅ **Zero risk** of 80-day sync penalty
+
+**Result: Hours instead of months. Production-ready reliability.**
+
+---
+
 ## Features
 
-✅ **Resumable Downloads** - Interrupted downloads can be resumed from where they left off  
-✅ **MD5 Verification** - Automatic integrity checking using ETag/MD5 checksums  
-✅ **Parallel Downloads** - Concurrent downloads with configurable worker count (default: 4)  
-✅ **Multi-Shard Support** - Download multiple shards efficiently  
-✅ **Dynamic Progress Bar** - Unified, animated progress display with real-time stats  
-✅ **Automatic Retry** - Built-in retry logic for transient failures  
-✅ **Smart Caching** - Skip already-downloaded and verified chunks
+### Core Features
+- 🔄 **Resumable Downloads** - Continue interrupted downloads with MD5 verification
+- 🔄 **Resumable Extraction** - Resume extraction after interruption (no data loss)
+- ✅ **MD5 Verification** - Automatic integrity checking using ETag/MD5 checksums
+- ⚡ **Parallel Downloads** - Concurrent chunk downloads (configurable workers, default: 4)
+- ⚡ **Parallel Decompression** - Multi-core CPU utilization for fast merging
+- 📊 **Progress Tracking** - Real-time progress bars with accurate ETA
+- 🔁 **Automatic Retry** - Built-in retry logic for transient network failures
+- 🎛️ **Stage Control** - Download, merge, and extract independently
+- 🌐 **Multi-Shard Support** - Efficiently download multiple shards
+- 🖥️ **Cross-Platform** - Pre-built binaries for Linux and macOS
 
-## Installation
+### Snapchain Compatibility
+- ✅ **100% compatible** with Snapchain snapshot format
+- ✅ **Same directory structure** (`.rocks` and `.rocks.snapshot`)
+- ✅ **Drop-in replacement** for Snapchain's snapshot download
+- ✅ **No migration needed** - Works with existing Snapchain setup
 
-### From Source
+## Quick Start
+
+### Installation
 
 ```bash
+# From source
 cargo install --path .
-```
 
-## Usage
+# Or download pre-built binaries from GitHub Releases
+```
 
 ### Basic Usage
 
-Download snapshots for specific shards:
-
 ```bash
-snapsync --shards 0,1 --output .rocks
+# Download and restore all shards (complete workflow)
+snapsync --shards 0,1,2
+
+# Download specific shard
+snapsync --shards 2 --output .rocks
+
+# Faster downloads with more workers
+snapsync --shards 2 --workers 8
+
+# Stage-based execution (download, merge, extract separately)
+snapsync --shards 2 --stage download  # Download chunks only
+snapsync --shards 2 --stage merge     # Merge chunks into tar
+snapsync --shards 2 --stage extract   # Extract tar to directory
+
+# Trust existing files (skip verification, fastest resume)
+snapsync --shards 2 --skip-verify
 ```
 
 ### All Options
