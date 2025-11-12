@@ -110,7 +110,15 @@ pub async fn download_snapshots(
 
     // Process each shard sequentially
     for &shard_id in &shard_ids {
-        let metadata_json = &all_metadata[&shard_id.to_string()];
+        let metadata_json = all_metadata.get(&shard_id.to_string()).ok_or_else(|| {
+            SnapshotError::DownloadFailed(format!(
+                "Metadata not found for shard {}. Available shards in metadata: {:?}. \
+                 This usually means the metadata.json file is incomplete or outdated. \
+                 Try running without --stage flag to re-download metadata.",
+                shard_id,
+                all_metadata.keys().collect::<Vec<_>>()
+            ))
+        })?;
         let base_path = &metadata_json.key_base;
 
         std::fs::create_dir_all(format!("{}/shard-{}", snapshot_dir, shard_id))?;
