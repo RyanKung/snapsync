@@ -48,13 +48,20 @@ pub(crate) fn extract_tar(
             .unwrap_or("")
             .to_string();
         let expected_size = entry.header().size()?;
+        let is_directory = entry.header().entry_type().is_dir();
 
         file_count = (index + 1) as u64;
+
+        // For directories, always extract (they're lightweight and size doesn't matter)
+        if is_directory {
+            entry.unpack_in(db_dir)?;
+            continue;
+        }
 
         // Check if file already exists with correct size
         let target_path = db_path.join(&entry_path);
 
-        let should_extract = if target_path.exists() {
+        let should_extract = if target_path.exists() && target_path.is_file() {
             match std::fs::metadata(&target_path) {
                 Ok(metadata) => {
                     let actual_size = metadata.len();
