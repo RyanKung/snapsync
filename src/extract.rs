@@ -129,6 +129,16 @@ pub(crate) fn extract_tar(
         if should_extract {
             entry.unpack_in(db_dir)?;
             extracted_count += 1;
+
+            // Log successful extraction
+            if file_name.ends_with(".sst") {
+                info!(
+                    "✅ Extracted {} (size: {} bytes, verified)",
+                    file_name, expected_size
+                );
+            } else {
+                info!("✅ Extracted {} (size: {} bytes)", file_name, expected_size);
+            }
         }
 
         // Update progress bar position
