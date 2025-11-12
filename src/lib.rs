@@ -39,4 +39,5 @@ mod verify;
 // Re-export public API
 pub use error::SnapshotError;
 pub use orchestrator::download_snapshots;
+pub use sst_verify::verify_sst_magic_number;
 pub use types::{DownloadConfig, ExecutionStage};

@@ -26,7 +26,7 @@ const ROCKSDB_MAGIC_NUMBER: u64 = 0x88e241b785f4cff7;
 /// # Performance
 ///
 /// Very fast: only reads 8 bytes from the end of the file (~0.1ms per file).
-pub(crate) fn verify_sst_magic_number(file_path: &str) -> Result<bool, io::Error> {
+pub fn verify_sst_magic_number(file_path: &str) -> Result<bool, io::Error> {
     let mut file = std::fs::File::open(file_path)?;
 
     // Get file size to ensure it's at least 8 bytes
