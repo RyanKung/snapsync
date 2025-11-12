@@ -220,13 +220,45 @@ pub async fn download_snapshots(
         let tar_size_bytes = tar_metadata.len();
         let tar_size_gb = tar_size_bytes as f64 / 1_073_741_824.0;
 
-        // RocksDB SST files are typically 10-50 MB, averaging ~25 MB
-        // Use 10.5 MB based on user's actual file sizes
-        const AVERAGE_FILE_SIZE_MB: f64 = 10.5;
-        let estimated_files = (tar_size_bytes as f64 / (AVERAGE_FILE_SIZE_MB * 1_048_576.0)) as u64;
+        // Smart estimation: scan first 100 entries to find max SST number
+        // Tar files are in reverse order (e.g., 004907.sst -> ... -> 000001.sst)
+        // So the first SST file we see has the maximum number
+        let estimated_files = tokio::task::spawn_blocking({
+            let tar_filename = tar_filename.clone();
+            move || -> Result<u64, SnapshotError> {
+                let file = std::fs::File::open(&tar_filename)?;
+                let mut archive = tar::Archive::new(file);
+                let mut max_sst_number = 0u64;
+
+                // Scan first 100 entries (very fast, < 1 second)
+                for entry in archive.entries()?.take(100).flatten() {
+                    if let Ok(path) = entry.path() {
+                        let path_str = path.to_string_lossy();
+                        // Extract SST number from filename like "shard-2/004907.sst"
+                        if path_str.ends_with(".sst") {
+                            if let Some(filename) = path_str.split('/').next_back() {
+                                if let Some(number_str) = filename.strip_suffix(".sst") {
+                                    if let Ok(number) = number_str.parse::<u64>() {
+                                        max_sst_number = max_sst_number.max(number);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Add some buffer for non-SST files (MANIFEST, CURRENT, LOG, etc.)
+                // Typically ~10-20 such files
+                Ok(max_sst_number + 20)
+            }
+        })
+        .await
+        .map_err(|e| {
+            SnapshotError::IoError(std::io::Error::other(format!("Task join error: {}", e)))
+        })??;
 
         info!(
-            "📊 Tar file size: {:.2} GB, estimated ~{} files (skipping slow counting phase)",
+            "📊 Tar file size: {:.2} GB, estimated ~{} files (smart scan of first 100 entries)",
             tar_size_gb, estimated_files
         );
 
