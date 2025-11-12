@@ -1,6 +1,6 @@
 //! RocksDB SST file verification using magic number.
 
-use std::io;
+use std::io::{self, Read, Seek};
 
 /// RocksDB SST file magic number (located at the last 8 bytes of the file).
 ///
@@ -26,24 +26,22 @@ const ROCKSDB_MAGIC_NUMBER: u64 = 0x88e241b785f4cff7;
 /// # Performance
 ///
 /// Very fast: only reads 8 bytes from the end of the file (~0.1ms per file).
-pub(crate) async fn verify_sst_magic_number(file_path: &str) -> Result<bool, io::Error> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
-    let mut file = tokio::fs::File::open(file_path).await?;
+pub(crate) fn verify_sst_magic_number(file_path: &str) -> Result<bool, io::Error> {
+    let mut file = std::fs::File::open(file_path)?;
 
     // Get file size to ensure it's at least 8 bytes
-    let file_size = file.metadata().await?.len();
+    let file_size = file.metadata()?.len();
     if file_size < 8 {
         // File too small to be a valid SST file
         return Ok(false);
     }
 
     // Seek to the last 8 bytes (magic number location)
-    file.seek(io::SeekFrom::End(-8)).await?;
+    file.seek(io::SeekFrom::End(-8))?;
 
     // Read the magic number bytes
     let mut magic_bytes = [0u8; 8];
-    file.read_exact(&mut magic_bytes).await?;
+    file.read_exact(&mut magic_bytes)?;
 
     // Parse as little-endian u64 (RocksDB uses little-endian)
     let actual_magic = u64::from_le_bytes(magic_bytes);

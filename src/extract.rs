@@ -61,7 +61,7 @@ pub(crate) fn extract_tar(
                     if actual_size == expected_size {
                         // File size matches, check magic number for .sst files
                         if file_name.ends_with(".sst") {
-                            match verify_sst_magic_number(target_path.to_str().unwrap()).await {
+                            match verify_sst_magic_number(target_path.to_str().unwrap()) {
                                 Ok(true) => {
                                     // Magic number valid, file is complete
                                     skipped_count += 1;
